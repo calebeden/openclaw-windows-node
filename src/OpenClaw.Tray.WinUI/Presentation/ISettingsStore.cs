@@ -1,3 +1,5 @@
+using OpenClaw.Shared;
+
 namespace OpenClawTray.Presentation;
 
 /// <summary>
@@ -75,6 +77,8 @@ public interface ISettingsEditor
     bool CameraRecordingConsentGiven { set; }
 
     bool ShowChatToolCalls { set; }
+    string VoiceAssistantMode { set; }
+    string VoiceAssistantWakePhrase { set; }
 }
 
 /// <summary>
@@ -108,4 +112,6 @@ public sealed record SettingsSnapshot
     /// <summary>Reflects <c>VoiceTtsEnabled</c>; the "read responses aloud" toggle mirrors it.</summary>
     public bool VoiceTtsEnabled { get; init; }
     public bool ShowChatToolCalls { get; init; }
+    public string VoiceAssistantMode { get; init; } = VoiceAssistantSettingsPolicy.OffMode;
+    public string VoiceAssistantWakePhrase { get; init; } = VoiceAssistantSettingsPolicy.DefaultWakePhrase;
 }

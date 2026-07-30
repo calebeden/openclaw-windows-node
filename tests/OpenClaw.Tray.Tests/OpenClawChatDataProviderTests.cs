@@ -2,6 +2,7 @@ using OpenClaw.Chat;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Telemetry;
 using OpenClawTray.Chat;
+using OpenClawTray.Services.VoiceAssistant;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
@@ -268,6 +269,78 @@ public class OpenClawChatDataProviderTests
 
     private static SessionInfo MainSession() =>
         new() { Key = "main", IsMain = true, DisplayName = "Main session", Status = "active" };
+
+    [Fact]
+    public async Task VoiceAssistant_FinalWithoutGatewayMetadata_CorrelatesByTrackedText()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+
+        var receipt = await adapter.SendAsync("main", "voice request", CancellationToken.None);
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            State = "final",
+            Text = "voice response"
+        });
+
+        var notification = new OpenClawNotification
+        {
+            IsChat = true,
+            SessionKey = "main",
+            Message = "voice response",
+            FullMessage = "voice response"
+        };
+
+        Assert.True(adapter.IsResponseForTurn(receipt, notification));
+        Assert.False(adapter.IsResponseForTurn(receipt, notification));
+    }
+
+    [Fact]
+    public async Task VoiceAssistant_LateFinalAfterCancellation_IsNotRetained()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+        var receipt = await adapter.SendAsync("main", "voice request", CancellationToken.None);
+
+        await adapter.CancelAsync(receipt, CancellationToken.None);
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            State = "final",
+            Text = "late response"
+        });
+
+        Assert.False(adapter.IsResponseForTurn(receipt, new OpenClawNotification
+        {
+            IsChat = true,
+            SessionKey = "main",
+            Message = "late response",
+            FullMessage = "late response"
+        }));
+    }
 
     private static AgentEventInfo MakeAgentEvent(string stream, string json, string sessionKey = "main", string? runId = null)
     {

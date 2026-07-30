@@ -54,6 +54,8 @@ internal sealed class SettingsStore : ISettingsStore
         CameraRecordingConsentGiven = _settings.CameraRecordingConsentGiven,
         VoiceTtsEnabled = _settings.VoiceTtsEnabled,
         ShowChatToolCalls = _settings.ShowChatToolCalls,
+        VoiceAssistantMode = _settings.VoiceAssistantMode,
+        VoiceAssistantWakePhrase = _settings.VoiceAssistantWakePhrase,
     };
 
     public void Update(Action<ISettingsEditor> edit)
@@ -134,5 +136,7 @@ internal sealed class SettingsStore : ISettingsStore
         public bool ScreenRecordingConsentGiven { set => _settings.ScreenRecordingConsentGiven = value; }
         public bool CameraRecordingConsentGiven { set => _settings.CameraRecordingConsentGiven = value; }
         public bool ShowChatToolCalls { set => _settings.ShowChatToolCalls = value; }
+        public string VoiceAssistantMode { set => _settings.VoiceAssistantMode = value; }
+        public string VoiceAssistantWakePhrase { set => _settings.VoiceAssistantWakePhrase = value; }
     }
 }

@@ -16,6 +16,16 @@ public sealed class SpeechInputContractTests
     }
 
     [Fact]
+    public void VoiceService_SerializesContinuousCaptureStartAndStop()
+    {
+        var cs = Read("src", "OpenClaw.Tray.WinUI", "Services", "VoiceService.cs");
+
+        Assert.Contains("private readonly SemaphoreSlim _sessionGate = new(1, 1);", cs);
+        Assert.Contains("await _sessionGate.WaitAsync().ConfigureAwait(false);", cs);
+        Assert.Contains("await CleanupSessionCoreAsync().ConfigureAwait(false);", cs);
+    }
+
+    [Fact]
     public void AudioPipeline_UsesManagedEnergyVad_NotNativeVad()
     {
         var cs = Read("src", "OpenClaw.Tray.WinUI", "Services", "AudioPipeline.cs");

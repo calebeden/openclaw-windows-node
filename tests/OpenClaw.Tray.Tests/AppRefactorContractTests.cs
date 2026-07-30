@@ -5,6 +5,19 @@ namespace OpenClaw.Tray.Tests;
 public sealed class AppRefactorContractTests
 {
     [Fact]
+    public void VoiceAssistant_StateMachineStaysOutsideApp()
+    {
+        var source = ReadAppSources();
+
+        Assert.Contains("_voiceAssistantCoordinator?.TryClaimResponse(notification)", source);
+        Assert.Contains("new VoiceAssistantCoordinator(", source);
+        Assert.DoesNotContain("enum VoiceAssistantState", source);
+        Assert.DoesNotContain("VoiceAssistantState.Dispatching", source);
+        Assert.DoesNotContain("VoiceAssistantState.WaitingForReply", source);
+        Assert.DoesNotContain("VoiceAssistantState.Speaking", source);
+    }
+
+    [Fact]
     public void Startup_UsesConnectionManagerAsOnlyGatewayClientOwner()
     {
         var source = ReadAppSources();

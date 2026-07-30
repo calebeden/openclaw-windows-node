@@ -12,6 +12,7 @@ using OpenClaw.Shared.Telemetry;
 using OpenClawTray.Dialogs;
 using OpenClawTray.Helpers;
 using OpenClawTray.Services;
+using OpenClawTray.Services.VoiceAssistant;
 using OpenClawTray.Windows;
 using OpenClaw.Connection;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,7 +41,10 @@ using SetupWindow = OpenClaw.SetupEngine.UI.SetupWindow;
 
 namespace OpenClawTray;
 
-public partial class App : Application, OpenClawTray.Services.IAppCommands
+public partial class App :
+    Application,
+    OpenClawTray.Services.IAppCommands,
+    IVoiceAssistantSettingsEnvironment
 {
     internal static readonly UpdatumManager AppUpdater = new("openclaw", "openclaw-windows-node")
     {
@@ -53,6 +57,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     private GatewayConnectionManager? _connectionManager;
     private GatewayRegistry? _gatewayRegistry;
     private OpenClawTray.Chat.OpenClawChatCoordinator? _chatCoordinator;
+    private VoiceAssistantCoordinator? _voiceAssistantCoordinator;
+    private VoiceAssistantInput? _voiceAssistantInput;
+    private VoiceAssistantChatTurnClient? _voiceAssistantChatTurnClient;
+    private readonly SemaphoreSlim _voiceAssistantLifecycleGate = new(1, 1);
 
     /// <summary>
     /// Root DI composition root, built once during startup and disposed during
@@ -72,6 +80,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         new Dictionary<Type, Type>
         {
             [typeof(Pages.SettingsPage)] = typeof(SettingsPageViewModel),
+            [typeof(Pages.VoiceSettingsPage)] = typeof(VoiceAssistantSettingsViewModel),
         };
 
     /// <summary>The root service provider, or null before startup / after shutdown.</summary>
@@ -459,7 +468,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         }
 
         var dispatcher = new WinUIDispatcher(_dispatcherQueue);
-        var context = new AppServiceContext(dispatcher, this, _settings);
+        var context = new AppServiceContext(dispatcher, this, _settings, this);
 
         var services = new ServiceCollection();
         services.AddOpenClawTrayCore(context);
@@ -1985,7 +1994,15 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     /// Handles the connection manager's OperatorClientChanged event.
     /// Re-wires all 27 data event handlers from the old client to the new one.
     /// </summary>
-    private void OnOperatorClientChanged(object? sender, OperatorClientChangedEventArgs e)
+    private void OnOperatorClientChanged(object? sender, OperatorClientChangedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            () => OnOperatorClientChangedAsync(sender, e),
+            new AppLogger(),
+            nameof(OnOperatorClientChanged));
+
+    private async Task OnOperatorClientChangedAsync(
+        object? sender,
+        OperatorClientChangedEventArgs e)
     {
         if (_dispatcherQueue is { HasThreadAccess: false } dispatcher)
         {
@@ -1998,6 +2015,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
         // Delegate all 27 event subscriptions to GatewayService
         _gatewayService?.AttachClient(e.NewClient, e.OldClient);
+        await DisposeVoiceAssistantCoordinatorAsync();
 
         // Configure new client
         if (e.NewClient is { } client)
@@ -2017,6 +2035,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         }
 
         RaiseChatProviderChanged();
+        ObserveBackgroundFault(
+            RebuildVoiceAssistantCoordinatorAsync(),
+            "Voice assistant failed to rebuild after provider replacement");
 
         // Update UI references
         if (_appState != null)
@@ -2109,6 +2130,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             _nodeService.GatewaySelfUpdated += _gatewayService.OnGatewaySelfUpdated;
             _nodeService.LocalExecApprovalRequested += OnLocalExecApprovalRequested;
             _nodeService.LocalExecApprovalDecided += OnLocalExecApprovalDecided;
+            ObserveBackgroundFault(
+                RebuildVoiceAssistantCoordinatorAsync(),
+                "Voice assistant failed to rebuild after node startup");
             return _nodeService;
         }
         catch (Exception ex)
@@ -2798,6 +2822,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         {
             UpdateStatusDetailWindow();
         });
+        if (_voiceAssistantCoordinator is { } voiceAssistant)
+        {
+            ObserveBackgroundFault(
+                voiceAssistant.ReconcileAsync(),
+                "Voice assistant failed to reconcile gateway state");
+        }
     }
 
     /// <summary>
@@ -2906,6 +2936,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         if (notification.IsChat && !string.IsNullOrEmpty(notification.Message))
         {
             var speechText = ChatNotificationSpeechText.Resolve(notification);
+            var claimedByVoiceAssistant =
+                _voiceAssistantCoordinator?.TryClaimResponse(notification) == true;
 
             // Suppress TTS/voice overlay when the user has aborted the response.
             if (ChatProvider?.IsResponseSuppressed == true)
@@ -2925,7 +2957,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             // }
 
             // TTS: read response aloud whenever chat TTS is enabled and ready (any chat surface).
-            if (SpeechSetupReadiness.IsAutomaticChatTtsEnabled(_settings))
+            if (!claimedByVoiceAssistant &&
+                SpeechSetupReadiness.IsAutomaticChatTtsEnabled(_settings))
             {
                 _ = (_chatCoordinator?.SpeakResponseAsync(speechText) ?? Task.CompletedTask);
             }
@@ -3488,6 +3521,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         SyncActiveGatewayBrowserProxyForward();
         Logger.Info($"[SETTINGS] Change impact: {impact}");
         PublishSandboxRiskNotificationIfNeeded();
+        ObserveBackgroundFault(
+            ApplyVoiceAssistantSettingsAsync(),
+            "Voice assistant failed to apply settings");
 
         switch (impact)
         {
@@ -4631,6 +4667,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             _globalHotkey = null;
         });
 
+        await SafeShutdownStepAsync("voice assistant", DisposeVoiceAssistantCoordinatorAsync);
+
         // Stop chat first so provider event handlers cannot drain client-only
         // queued prompts while the gateway connection is shutting down.
         SafeShutdownStep("chat coordinator", () =>
@@ -4738,6 +4776,155 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         Logger.Info("Shutdown complete; calling Exit() now");
         Exit();
     }
+
+    private async Task RebuildVoiceAssistantCoordinatorAsync()
+    {
+        await _voiceAssistantLifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await DisposeVoiceAssistantCoordinatorCoreAsync().ConfigureAwait(false);
+
+            var settings = _settings;
+            var chatCoordinator = _chatCoordinator;
+            var provider = chatCoordinator?.Provider;
+            if (_isExiting ||
+                settings is null ||
+                chatCoordinator is null ||
+                provider is null ||
+                !string.Equals(
+                    settings.VoiceAssistantMode,
+                    VoiceAssistantSettingsPolicy.WakeOneShotMode,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var voiceService = VoiceService ?? EnsureStandaloneVoiceService();
+            if (voiceService is null)
+                return;
+
+            var input = new VoiceAssistantInput(voiceService);
+            var chat = new VoiceAssistantChatTurnClient(provider);
+            var coordinator = new VoiceAssistantCoordinator(
+                input,
+                chat,
+                new VoiceAssistantSpeaker(chatCoordinator),
+                () =>
+                {
+                    var readiness = SpeechSetupReadiness.GetVoiceAssistantReadiness(settings);
+                    return new VoiceAssistantConfiguration(
+                        Enabled: string.Equals(
+                            settings.VoiceAssistantMode,
+                            VoiceAssistantSettingsPolicy.WakeOneShotMode,
+                            StringComparison.Ordinal),
+                        LocalPrerequisitesReady: readiness.IsReady,
+                        WakePhrase: settings.VoiceAssistantWakePhrase);
+                });
+
+            _voiceAssistantInput = input;
+            _voiceAssistantChatTurnClient = chat;
+            _voiceAssistantCoordinator = coordinator;
+            coordinator.StateChanged += OnVoiceAssistantStateChanged;
+            await coordinator.ReconcileAsync().ConfigureAwait(false);
+            RaiseVoiceAssistantSettingsChanged();
+        }
+        finally
+        {
+            _voiceAssistantLifecycleGate.Release();
+        }
+    }
+
+    private async Task ApplyVoiceAssistantSettingsAsync()
+    {
+        var needsBuild = false;
+        await _voiceAssistantLifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_voiceAssistantCoordinator is not null)
+            {
+                await _voiceAssistantCoordinator.ReconcileAsync().ConfigureAwait(false);
+                RaiseVoiceAssistantSettingsChanged();
+                return;
+            }
+
+            needsBuild =
+                !_isExiting &&
+                string.Equals(
+                    _settings?.VoiceAssistantMode,
+                    VoiceAssistantSettingsPolicy.WakeOneShotMode,
+                    StringComparison.Ordinal);
+        }
+        finally
+        {
+            _voiceAssistantLifecycleGate.Release();
+        }
+
+        if (needsBuild)
+            await RebuildVoiceAssistantCoordinatorAsync().ConfigureAwait(false);
+        else
+            RaiseVoiceAssistantSettingsChanged();
+    }
+
+    private async Task DisposeVoiceAssistantCoordinatorAsync()
+    {
+        await _voiceAssistantLifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await DisposeVoiceAssistantCoordinatorCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _voiceAssistantLifecycleGate.Release();
+        }
+    }
+
+    private async Task DisposeVoiceAssistantCoordinatorCoreAsync()
+    {
+        var coordinator = _voiceAssistantCoordinator;
+        _voiceAssistantCoordinator = null;
+        if (coordinator is not null)
+        {
+            coordinator.StateChanged -= OnVoiceAssistantStateChanged;
+            await coordinator.DisposeAsync().ConfigureAwait(false);
+        }
+
+        _voiceAssistantChatTurnClient?.Dispose();
+        _voiceAssistantChatTurnClient = null;
+        _voiceAssistantInput?.Dispose();
+        _voiceAssistantInput = null;
+        RaiseVoiceAssistantSettingsChanged();
+    }
+
+    private event EventHandler? VoiceAssistantSettingsChanged;
+
+    event EventHandler? IVoiceAssistantSettingsEnvironment.Changed
+    {
+        add => VoiceAssistantSettingsChanged += value;
+        remove => VoiceAssistantSettingsChanged -= value;
+    }
+
+    VoiceAssistantState IVoiceAssistantSettingsEnvironment.RuntimeState =>
+        _voiceAssistantCoordinator?.State ??
+        (string.Equals(
+            _settings?.VoiceAssistantMode,
+            VoiceAssistantSettingsPolicy.WakeOneShotMode,
+            StringComparison.Ordinal)
+                ? VoiceAssistantState.Unavailable
+                : VoiceAssistantState.Off);
+
+    VoiceAssistantReadinessResult IVoiceAssistantSettingsEnvironment.GetReadiness(string wakePhrase) =>
+        _settings is { } settings
+            ? SpeechSetupReadiness.GetVoiceAssistantReadiness(settings, wakePhrase)
+            : new VoiceAssistantReadinessResult(false, VoiceAssistantReadinessReason.SttDisabled);
+
+    string IVoiceAssistantSettingsEnvironment.GetString(string key) =>
+        LocalizationHelper.GetString(key);
+
+    private void OnVoiceAssistantStateChanged(VoiceAssistantState state) =>
+        RaiseVoiceAssistantSettingsChanged();
+
+    private void RaiseVoiceAssistantSettingsChanged() =>
+        OnUiThread(() => VoiceAssistantSettingsChanged?.Invoke(this, EventArgs.Empty));
 
     private static void CloseWindow(Window? window)
     {

@@ -1313,7 +1313,11 @@ public class OpenClawGatewayClientTests
             "message": {
               "role": "assistant",
               "content": "assistant reply",
-              "timestamp": 1781631280633
+              "timestamp": 1781631280633,
+              "__openclaw": {
+                "id": "assistant-message-7",
+                "seq": 7
+              }
             },
             "state": "{{state}}"
           }
@@ -1325,6 +1329,8 @@ public class OpenClawGatewayClientTests
             Assert.NotNull(notification);
             Assert.Equal("assistant reply", notification!.Message);
             Assert.True(notification.IsChat);
+            Assert.Equal("assistant-message-7", notification.OpenClawId);
+            Assert.Equal(7, notification.OpenClawSeq);
         }
         else
         {

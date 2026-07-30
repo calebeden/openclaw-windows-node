@@ -11,6 +11,7 @@ using OpenClaw.Shared;
 using OpenClawTray.Helpers;
 #endif
 using OpenClawTray.Services;
+using OpenClawTray.Services.VoiceAssistant;
 
 namespace OpenClawTray.Chat;
 
@@ -147,6 +148,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private readonly Dictionary<string, Queue<LocalSentText>> _localSentTexts = new();
     private readonly Dictionary<string, List<ChatQueuedMessage>> _queuedMessages = new();
     private readonly Dictionary<string, List<QueuedSendRequest>> _queuedSendRequests = new();
+    private readonly Dictionary<string, string> _voiceAssistantMessageIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<string, string>> _queuedMessageIdsByRunId = new();
     private readonly Dictionary<string, List<string>> _terminalRunIdsByThread = new();
     private readonly HashSet<string> _queuedDrainScheduledThreads = new(StringComparer.Ordinal);
@@ -185,6 +187,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         long StartedRunStartSequence,
         ChatTelemetryTracker.QueuePhaseCompletion? QueueCompletion,
         bool StartedDirectly);
+    internal sealed record VoiceAssistantResponseIdentity(
+        string LocalMessageId,
+        string SessionKey,
+        string? GatewayMessageId,
+        int? GatewaySequence,
+        string ResponseText);
     private enum AssistantQueueFrameDisposition
     {
         Render,
@@ -228,6 +236,23 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private bool _disposed;
 
     public string DisplayName => "OpenClaw gateway";
+
+    internal event Action<VoiceAssistantResponseIdentity>? VoiceAssistantResponseObserved;
+
+    internal string? GetVoiceAssistantReadySessionKey()
+    {
+        lock (_gate)
+        {
+            var sessionKey = _bridge.MainSessionKey;
+            return _bridge.HasHandshakeSnapshot &&
+                _status == ConnectionStatus.Connected &&
+                _sessionsListReceived &&
+                !string.IsNullOrWhiteSpace(sessionKey) &&
+                CanSendDirectlyLocked(sessionKey)
+                    ? sessionKey
+                    : null;
+        }
+    }
 
     /// <summary>Last-known chat state from a previous session, used for pre-connection UI.</summary>
     internal LastChatState? CachedLastChatState => _lastChatState;
@@ -454,6 +479,117 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
         if (dispatch is not null)
             await DispatchQueuedSendAsync(dispatch, rethrow: true, cancellationToken);
+    }
+
+    internal async Task<VoiceAssistantTurnReceipt> SendVoiceAssistantMessageAsync(
+        string threadId,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(threadId))
+            throw new ArgumentException("Thread id is required.", nameof(threadId));
+        if (string.IsNullOrWhiteSpace(message))
+            throw new ArgumentException("Message is required.", nameof(message));
+
+        var trimmed = message.Trim();
+        var nonce = Guid.NewGuid().ToString("N");
+        ChatDataSnapshot snapshot;
+        QueuedSendDispatch? dispatch;
+        QueuedSendRequest request;
+        bool sendDirectly;
+        int? preSendSequence;
+
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var messageId = $"q{++_queuedMessageSequence}";
+            request = new QueuedSendRequest(
+                messageId,
+                Guid.NewGuid().ToString(),
+                threadId,
+                trimmed,
+                trimmed,
+                nonce,
+                Attachments: null);
+            preSendSequence = GetLatestGatewaySequenceLocked(threadId);
+            sendDirectly = CanSendDirectlyLocked(threadId);
+            _telemetry.StartLocalTurn(request.Id, threadId, queued: !sendDirectly);
+
+            if (sendDirectly)
+            {
+                _abortedThreads.Remove(threadId);
+                _pendingAbortCounts.Remove(threadId);
+                dispatch = StartDirectSendLocked(request);
+                _voiceAssistantMessageIds[threadId] = request.Id;
+            }
+            else
+            {
+                AddQueuedMessageLocked(threadId, new ChatQueuedMessage(
+                    request.Id,
+                    request.DisplayText,
+                    DateTimeOffset.UtcNow,
+                    request.LocalNonce));
+                AddQueuedSendRequestLocked(request);
+                dispatch = null;
+            }
+
+            snapshot = BuildSnapshotLocked();
+        }
+
+        Publish(snapshot);
+        if (dispatch is not null)
+        {
+            try
+            {
+                await DispatchQueuedSendAsync(dispatch, rethrow: true, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    if (_voiceAssistantMessageIds.TryGetValue(threadId, out var trackedId) &&
+                        string.Equals(trackedId, request.Id, StringComparison.Ordinal))
+                    {
+                        _voiceAssistantMessageIds.Remove(threadId);
+                    }
+                }
+                throw;
+            }
+        }
+
+        return new VoiceAssistantTurnReceipt(
+            sendDirectly ? VoiceAssistantSendDisposition.Direct : VoiceAssistantSendDisposition.Queued,
+            threadId,
+            request.Id,
+            request.SendRunId,
+            preSendSequence);
+    }
+
+    internal async Task CancelVoiceAssistantTurnAsync(
+        VoiceAssistantTurnReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (_voiceAssistantMessageIds.TryGetValue(receipt.SessionKey, out var trackedId) &&
+                string.Equals(trackedId, receipt.LocalMessageId, StringComparison.Ordinal))
+            {
+                _voiceAssistantMessageIds.Remove(receipt.SessionKey);
+            }
+        }
+
+        if (receipt.Disposition == VoiceAssistantSendDisposition.Queued)
+        {
+            await CancelQueuedMessageAsync(
+                receipt.SessionKey,
+                receipt.LocalMessageId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await StopResponseAsync(receipt.SessionKey, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     internal Task<bool> EnqueueCompactCommandAsync(
@@ -2826,8 +2962,18 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         if (message.IsFinal)
         {
             ChatTelemetryTracker.PreparedTurnCompletion? turnCompletion = null;
+            VoiceAssistantResponseIdentity? voiceAssistantResponse = null;
             lock (_gate)
             {
+                if (_voiceAssistantMessageIds.Remove(threadId, out var localMessageId))
+                {
+                    voiceAssistantResponse = new VoiceAssistantResponseIdentity(
+                        localMessageId,
+                        threadId,
+                        message.OpenClawId,
+                        message.OpenClawSeq,
+                        rawText);
+                }
                 if (_activeRunIds.Remove(threadId, out var completedRunId))
                 {
                     turnCompletion = _telemetry.PrepareFinishByRunId(
@@ -2842,6 +2988,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 if (!HasSendingQueuedMessagesLocked(threadId))
                     _locallyInitiatedThreads.Remove(threadId);
             }
+            if (voiceAssistantResponse is not null)
+                VoiceAssistantResponseObserved?.Invoke(voiceAssistantResponse);
             _telemetry.CompletePreparedTurn(turnCompletion);
             SnapshotLatestAssistantUsage(threadId);
             ApplyEventAndPublish(threadId, new ChatTurnEndEvent());
@@ -3495,6 +3643,20 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         if (_timelines.TryGetValue(threadId, out var timeline) && timeline.TurnActive)
             return false;
         return !HasPendingQueuedMessagesLocked(threadId);
+    }
+
+    private int? GetLatestGatewaySequenceLocked(string threadId)
+    {
+        if (!_entryMeta.TryGetValue(threadId, out var metadata))
+            return null;
+
+        int? latest = null;
+        foreach (var item in metadata.Values)
+        {
+            if (item.OpenClawSeq is { } sequence && (latest is null || sequence > latest))
+                latest = sequence;
+        }
+        return latest;
     }
 
     private bool CanClearAssistantFallbackPromotionLocked(string threadId)
