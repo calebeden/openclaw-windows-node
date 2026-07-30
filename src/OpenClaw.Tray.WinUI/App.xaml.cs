@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
+using OpenClaw.Shared.ExecApprovals;
 using OpenClaw.Shared.Sessions;
 using OpenClaw.Shared.Mxc;
 using OpenClaw.Shared.Telemetry;
@@ -56,6 +57,8 @@ public partial class App :
     private TrayIconCoordinator? _trayIconCoordinator;
     private GatewayConnectionManager? _connectionManager;
     private GatewayRegistry? _gatewayRegistry;
+    private OpenClawTray.Services.ManagedLocalGatewayAutoRepairMonitor? _managedLocalAutoRepairMonitor;
+    private ManagedLocalGatewayPortProvenanceService? _managedLocalPortProvenance;
     private OpenClawTray.Chat.OpenClawChatCoordinator? _chatCoordinator;
     private VoiceAssistantCoordinator? _voiceAssistantCoordinator;
     private VoiceAssistantInput? _voiceAssistantInput;
@@ -101,6 +104,8 @@ public partial class App :
     public IOperatorGatewayClient? GatewayClient => _connectionManager?.OperatorClient;
     public GatewayRegistry? Registry => _gatewayRegistry;
     public GatewayConnectionManager? ConnectionManager => _connectionManager;
+    internal ManagedLocalGatewayPortProvenanceService? ManagedLocalPortProvenance =>
+        _managedLocalPortProvenance;
     internal SettingsManager Settings => _settings ?? throw new InvalidOperationException("Settings are not initialized.");
     internal SettingsManager? SettingsOrNull => _settings;
     internal string DataDirectoryPath => DataPath;
@@ -113,6 +118,10 @@ public partial class App :
     internal string? NodeFullDeviceId => _nodeService?.FullDeviceId;
     /// <summary>Live node service instance used by settings surfaces for MCP status.</summary>
     internal NodeService? ActiveNodeService => _nodeService;
+    internal ExecApprovalsStore ExecApprovalsStore =>
+        _execApprovalsStore ??= new ExecApprovalsStore(
+            AppIdentity.ResolveRoamingDataDirectory(),
+            new AppLogger());
 
     /// <summary>
     /// Session key that the chat surface should select on its next mount.
@@ -263,6 +272,7 @@ public partial class App :
     
     // Node service (optional, enabled in settings)
     private NodeService? _nodeService;
+    private ExecApprovalsStore? _execApprovalsStore;
     // Keep-alive window to anchor WinUI runtime (prevents GC/threading issues)
     private Window? _keepAliveWindow;
     private SetupWindow? _setupWindow;
@@ -603,7 +613,7 @@ public partial class App :
         _settings = new SettingsManager();
         // Seed chat tool-call visibility from persisted settings so the timeline
         // honors the Settings > Chat "Show tool calls and usage" toggle on launch.
-        OpenClawTray.Chat.OpenClawChatRoot.SetToolCallsVisible(_settings.ShowChatToolCalls);
+        OpenClawTray.Chat.OpenClawReactorChatRoot.SetToolCallsVisible(_settings.ShowChatToolCalls);
         _previousSettingsSnapshot = _settings.ToSettingsData().ToConnectionSnapshot();
         _openTelemetryConnection = new OpenTelemetryEndpointConnection();
         await _openTelemetryConnection.ApplyAsync(
@@ -614,7 +624,7 @@ public partial class App :
             new AppLogger(),
             _dispatcherQueue is null
                 ? null
-                : OpenClawTray.Chat.FunctionalChatHostExtensions.AsPost(_dispatcherQueue));
+                : OpenClawTray.Chat.ReactorChatHostExtensions.AsPost(_dispatcherQueue));
         DiagnosticsJsonlService.Configure(DataPath);
 
         // Central observable model + gateway event handler.
@@ -785,13 +795,16 @@ public partial class App :
             }
         };
         // SshTunnelService implements ISshTunnelManager directly — no shim needed
+        var managedLocalPortProvenance = _managedLocalPortProvenance =
+            new ManagedLocalGatewayPortProvenanceService(appLogger);
         _connectionManager = new GatewayConnectionManager(
             credentialResolver, clientFactory, _gatewayRegistry, appLogger,
             identityStore: new DeviceIdentityFileStore(appLogger),
             nodeConnector: nodeConnector,
             isNodeEnabled: IsGatewayNodeEnabled,
             diagnostics: diagnostics,
-            tunnelManager: _sshTunnelService);
+            tunnelManager: _sshTunnelService,
+            endpointProvenanceProbe: managedLocalPortProvenance.InspectAsync);
         _connectionManager.OperatorClientChanged += OnOperatorClientChanged;
         _connectionManager.StateChanged += OnManagerStateChanged;
 
@@ -807,6 +820,11 @@ public partial class App :
                 await ShowOnboardingAsync();
                 setupShownDuringStartup = true;
             }
+        }
+        catch (DeviceIdentityLoadException ex)
+        {
+            Logger.Error($"Stored device identity load failed during launch setup detection: {ex.InnerException?.Message}");
+            ShowTransientConnectionError(ex.Message);
         }
         catch (Exception ex)
         {
@@ -834,6 +852,57 @@ public partial class App :
         // runs detached from the tray — see WslDistroKeepAlive in LocalGatewaySetup.cs.
         var wslKeepAlive = new WslGatewayKeepAliveService(() => _settings, () => _gatewayRegistry);
         _ = Task.Run(wslKeepAlive.TryEnsureAsync);
+
+        // Automatic self-repair for app-owned setup-managed local WSL gateways: if the local
+        // gateway process goes down, probe it and (only if actually unreachable) restart the WSL
+        // distro, re-arm the keepalive, and reconnect — without user action. Strictly gated to
+        // setup-managed local WSL gateways; the reconnect is gateway-pinned + cancellable so a
+        // gateway switch or shutdown mid-repair cannot disrupt another gateway. Kill switch:
+        // Settings.EnableManagedLocalGatewayAutoRepair.
+        var managedLocalRestarter = new OpenClawTray.Services.WslManagedLocalGatewayRestarter(
+            new WslGatewayController(new WslExeCommandRunner(new AppLogger(), defaultTimeout: TimeSpan.FromSeconds(30)), appLogger));
+        var managedLocalRepairCoordinator = new OpenClawTray.Services.ManagedLocalGatewayRepairCoordinator(
+            _gatewayRegistry,
+            managedLocalRestarter,
+            (url, ct) => OpenClawTray.Services.GatewayReachabilityProbe.IsReachableAsync(url, ct),
+            (gatewayId, ct) => _connectionManager?.ReconnectIfCurrentAsync(gatewayId, ct) ?? Task.FromResult(false),
+            () => _connectionManager?.CurrentSnapshot.OperatorState == RoleConnectionState.Connected,
+            _ => wslKeepAlive.TryEnsureAsync(),
+            diagnostics,
+            appLogger,
+            tryAcquireLifecycleLease: () => _connectionManager?.TryAcquireGatewayLifecycleLease(),
+            isRestartStillWarranted: () => OpenClawTray.Services.ManagedLocalGatewayAutoRepairMonitor.IsRepairCandidate(
+                _connectionManager?.CurrentSnapshot ?? GatewayConnectionSnapshot.Idle),
+            isAutomaticRepairAllowed: gatewayId => _connectionManager?.IsAutomaticReconnectAllowed(gatewayId) ?? false,
+            repairPortConflictAsync: (record, ct) =>
+                OpenClawTray.Services.ManagedLocalGatewayAutoRepairMonitor.IsRepairCandidate(
+                    _connectionManager?.CurrentSnapshot ?? GatewayConnectionSnapshot.Idle) &&
+                _connectionManager?.CurrentSnapshot.OperatorErrorKind == GatewayErrorKind.LocalPortConflict
+                    ? managedLocalPortProvenance.RepairConflictAsync(
+                        record,
+                        ct,
+                        canContinue: () =>
+                            string.Equals(
+                                _gatewayRegistry?.ActiveGatewayId,
+                                record.Id,
+                                StringComparison.Ordinal) &&
+                            (_connectionManager?.IsAutomaticReconnectAllowed(record.Id) ?? false))
+                    : Task.FromResult(new ManagedLocalPortConflictRepairResult(
+                        ManagedLocalPortConflictRepairOutcome.NotNeeded)),
+            isPortConflictCandidate: () =>
+                _connectionManager?.CurrentSnapshot.OperatorErrorKind == GatewayErrorKind.LocalPortConflict);
+        _managedLocalAutoRepairMonitor = new OpenClawTray.Services.ManagedLocalGatewayAutoRepairMonitor(
+            () => _connectionManager?.CurrentSnapshot ?? GatewayConnectionSnapshot.Idle,
+            _gatewayRegistry,
+            ct => managedLocalRepairCoordinator.TryRepairActiveGatewayAsync(ct),
+            id => managedLocalRepairCoordinator.ResetAttemptBudget(id),
+            () => (_settings?.EnableManagedLocalGatewayAutoRepair ?? true)
+                  && !(_connectionManager?.IsManualGatewayLifecycleInProgress ?? false),
+            diagnostics,
+            appLogger,
+            isAutomaticRepairAllowed: gatewayId => _connectionManager?.IsAutomaticReconnectAllowed(gatewayId) ?? false);
+        _managedLocalAutoRepairMonitor.Start();
+
         InitializeGatewayClient();
 
         // Pre-warm chat window (WebView2 init takes 1-3s, do it now so left-click is instant)
@@ -1149,7 +1218,7 @@ public partial class App :
             case "status": ShowStatusDetail(); break;
             case "reconnect": ReconnectWithSyncedBrowserProxyForward(); break;
             case "disconnect":
-                _ = _connectionManager?.DisconnectAsync();
+                _ = _connectionManager?.DisconnectByUserAsync();
                 LocalDisconnectCleanup();
                 break;
             case "connection": ShowHub("connection"); break;
@@ -1480,8 +1549,24 @@ public partial class App :
     private TrayMenuSnapshot CaptureTrayMenuSnapshot()
     {
         // Show "Reconfigure" if there's an existing setup, "Setup Guide" if fresh
-        var hasExistingConfig = _settings != null
-            && !StartupSetupState.RequiresSetup(_settings, IdentityDataPath, _gatewayRegistry);
+        var hasExistingConfig = false;
+        if (_settings != null)
+        {
+            try
+            {
+                hasExistingConfig = !StartupSetupState.RequiresSetup(
+                    _settings,
+                    IdentityDataPath,
+                    _gatewayRegistry);
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored device identity load failed while opening the tray menu: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                hasExistingConfig = true;
+            }
+        }
+
         var hasSetupManagedLocalWslGateway = WslKeepAlivePolicy.HasSetupManagedLocalGateway(_gatewayRegistry?.GetAll());
         var setupMenuLabel = hasExistingConfig
             ? LocalizationHelper.GetString("Menu_Reconfigure")
@@ -1659,8 +1744,20 @@ public partial class App :
         else
         {
             // No record yet — create one from settings URL if we have a stored device token.
-            var hasStoredDeviceToken = DeviceIdentity.HasStoredDeviceToken(
-                Path.Combine(SettingsManager.SettingsDirectoryPath));
+            bool hasStoredDeviceToken;
+            try
+            {
+                hasStoredDeviceToken = DeviceIdentity.HasStoredDeviceToken(
+                    Path.Combine(SettingsManager.SettingsDirectoryPath));
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored device identity load failed during startup: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                TryStartLocalMcpOnlyNode();
+                return;
+            }
+
             if (!hasStoredDeviceToken)
             {
                 if (TryStartLocalMcpOnlyNode())
@@ -1732,10 +1829,32 @@ public partial class App :
         record = SyncGatewayBrowserProxyForward(record);
         var resolver = new CredentialResolver(DeviceIdentityFileReader.Instance);
         var identityDir = _gatewayRegistry.GetIdentityDirectory(record.Id);
-        var credential = ResolveStartupOperatorCredential(record, resolver, identityDir);
+        OpenClaw.Connection.GatewayCredential? credential;
+        try
+        {
+            credential = ResolveStartupOperatorCredential(record, resolver, identityDir);
+        }
+        catch (DeviceIdentityLoadException ex)
+        {
+            Logger.Error($"Stored device identity load failed during {context}: {ex.InnerException?.Message}");
+            ShowTransientConnectionError(ex.Message);
+            return false;
+        }
+
         if (credential == null)
         {
-            var nodeCredential = ResolveStartupNodeCredential(record, resolver, identityDir);
+            OpenClaw.Connection.GatewayCredential? nodeCredential;
+            try
+            {
+                nodeCredential = ResolveStartupNodeCredential(record, resolver, identityDir);
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored node identity load failed during {context}: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                return false;
+            }
+
             if (nodeCredential != null && IsGatewayNodeEnabled())
             {
                 Logger.Info(
@@ -1848,7 +1967,8 @@ public partial class App :
         if (_gatewayRegistry == null)
             return null;
 
-        var credential = resolver.ResolveOperator(record, identityDir);
+        var resolution = resolver.ResolveOperatorDetailed(record, identityDir);
+        var credential = ResolveStartupCredentialOrThrow(resolution, identityDir);
         if (credential != null)
             return credential;
 
@@ -1858,7 +1978,8 @@ public partial class App :
         if (!string.IsNullOrWhiteSpace(effectiveUrl) &&
             string.Equals(record.Url, effectiveUrl, StringComparison.OrdinalIgnoreCase))
         {
-            return resolver.ResolveOperator(record, SettingsManager.SettingsDirectoryPath);
+            resolution = resolver.ResolveOperatorDetailed(record, SettingsManager.SettingsDirectoryPath);
+            return ResolveStartupCredentialOrThrow(resolution, SettingsManager.SettingsDirectoryPath);
         }
 
         return null;
@@ -1869,7 +1990,8 @@ public partial class App :
         CredentialResolver resolver,
         string identityDir)
     {
-        var credential = resolver.ResolveNode(record, identityDir);
+        var resolution = resolver.ResolveNodeDetailed(record, identityDir);
+        var credential = ResolveStartupCredentialOrThrow(resolution, identityDir);
         if (credential != null)
             return credential;
 
@@ -1880,12 +2002,33 @@ public partial class App :
             return null;
         }
 
-        credential = resolver.ResolveNode(record, SettingsManager.SettingsDirectoryPath);
+        resolution = resolver.ResolveNodeDetailed(record, SettingsManager.SettingsDirectoryPath);
+        credential = ResolveStartupCredentialOrThrow(resolution, SettingsManager.SettingsDirectoryPath);
         if (credential == null)
             return null;
 
         TryCopyLegacyIdentityToGateway(record.Id, identityDir);
         return credential;
+    }
+
+    private static OpenClaw.Connection.GatewayCredential? ResolveStartupCredentialOrThrow(
+        GatewayCredentialResolution resolution,
+        string identityDir)
+    {
+        var failureStatus = resolution.PrimaryStatus ?? resolution.Status;
+        if (failureStatus is not (
+            GatewayCredentialResolutionStatus.Unreadable
+            or GatewayCredentialResolutionStatus.Corrupt))
+        {
+            return resolution.Credential;
+        }
+
+        Exception cause = failureStatus == GatewayCredentialResolutionStatus.Unreadable
+            ? new IOException(resolution.Detail ?? "Identity file could not be read.")
+            : new InvalidDataException(resolution.Detail ?? "Identity file is invalid.");
+        throw new DeviceIdentityLoadException(
+            Path.Combine(identityDir, "device-key-ed25519.json"),
+            cause);
     }
 
     private static void TryCopyLegacyIdentityToGateway(string gatewayId, string identityDir)
@@ -2110,16 +2253,36 @@ public partial class App :
                 new AppLogger(),
                 _dispatcherQueue,
                 DataPath,
-                rootProvider: () => _keepAliveWindow?.Content as FrameworkElement,
-                chatProviderProvider: () => _chatCoordinator?.Provider,
-                inlineApprovalAvailable: _ => IsNativeChatSurfaceActive,
                 settings: settings,
                 enableMcpServer: settings.EnableMcpServer,
                 identityDataPath: IdentityDataPath,
                 sharedGatewayTokenResolver: () => _gatewayRegistry?.GetActive()?.SharedGatewayToken,
                 browserControlPortResolver: () => _gatewayRegistry?.GetActive()?.BrowserControlPort,
                 activeGatewayTunnelResolver: () => _gatewayRegistry?.GetActive()?.SshTunnel,
-                activeGatewayUrlResolver: () => _gatewayRegistry?.GetActive()?.Url);
+                activeGatewayUrlResolver: () => _gatewayRegistry?.GetActive()?.Url,
+                browserControlAuthorization: async (uri, cancellationToken) =>
+                {
+                    var record = _gatewayRegistry?.GetActive();
+                    if (record is null || !uri.IsLoopback)
+                        return false;
+                    if (record.SshTunnel is not null)
+                        return _sshTunnelService?.IsActive == true;
+                    if (_managedLocalPortProvenance is null ||
+                        GatewayRecordEditing.ResolveManagedDistroName(record) is null)
+                    {
+                        return false;
+                    }
+
+                    var controlRecord = record with
+                    {
+                        Url = $"ws://localhost:{uri.Port}",
+                        IsLocal = true,
+                    };
+                    return (await _managedLocalPortProvenance.InspectAsync(
+                        controlRecord,
+                        cancellationToken)).Kind == GatewayEndpointProvenanceKind.ExpectedManagedGateway;
+                },
+                execApprovalsStore: ExecApprovalsStore);
             _nodeService.StatusChanged += OnNodeStatusChanged;
             _nodeService.NotificationRequested += OnNodeNotificationRequested;
             _nodeService.ToastRequested += OnNodeToastRequested;
@@ -2128,8 +2291,6 @@ public partial class App :
             _nodeService.InvokeCompleted += OnNodeInvokeCompleted;
             _nodeService.ToolTelemetryCompleted += OnNodeToolTelemetryCompleted;
             _nodeService.GatewaySelfUpdated += _gatewayService.OnGatewaySelfUpdated;
-            _nodeService.LocalExecApprovalRequested += OnLocalExecApprovalRequested;
-            _nodeService.LocalExecApprovalDecided += OnLocalExecApprovalDecided;
             ObserveBackgroundFault(
                 RebuildVoiceAssistantCoordinatorAsync(),
                 "Voice assistant failed to rebuild after node startup");
@@ -2586,185 +2747,8 @@ public partial class App :
                         args.ToastDeviceId)),
                 msg => Logger.Warn($"Failed to show node toast: {msg}")));
 
-    private void OnLocalExecApprovalRequested(object? sender, ExecApprovalPromptRequestedEventArgs args)
-    {
-        if (string.IsNullOrWhiteSpace(args.Request.SessionKey))
-            return;
-
-        try
-        {
-            _appNotificationService?.Show(new AppNotification
-            {
-                Id = BuildLocalApprovalPendingNotificationId(args.Request),
-                Title = LocalizationHelper.GetString("AppNotification_ExecApprovalPending_Title"),
-                Message = BuildLocalApprovalPendingNotificationMessage(args.Request),
-                Source = "exec-approval",
-                Category = "node.invoke",
-                Severity = AppNotificationSeverity.Warning,
-                DedupeKey = BuildLocalApprovalPendingDedupeKey(args.Request),
-                ActionLabel = LocalizationHelper.GetString("AppNotification_ExecApprovalPending_OpenChatAction"),
-                ActionRoute = AppNotificationActionRoutes.Chat(args.Request.SessionKey!)
-            });
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"Failed to post pending exec-approval app notification: {ex.Message}");
-        }
-    }
-
-    private void OnLocalExecApprovalDecided(object? sender, ExecApprovalPromptDecidedEventArgs args)
-    {
-        try { _appNotificationService?.Dismiss(BuildLocalApprovalPendingNotificationId(args.Request)); }
-        catch (Exception ex) { Logger.Debug($"Failed to dismiss pending exec-approval notification: {ex.Message}"); }
-
-        if (args.Source is ExecApprovalPromptDecisionSource.UserAllowOnce
-            or ExecApprovalPromptDecisionSource.UserAlwaysAllow)
-        {
-            try { _appNotificationService?.DismissByDedupeKey(BuildLocalDenyDedupeKey(args.Request)); }
-            catch (Exception ex) { Logger.Debug($"Failed to dismiss stale denied exec-approval notification: {ex.Message}"); }
-            return;
-        }
-
-        if (args.Source is not (ExecApprovalPromptDecisionSource.UserDeny
-            or ExecApprovalPromptDecisionSource.PolicyAutoDeny))
-            return;
-        try
-        {
-            _appNotificationService?.Show(new AppNotification
-            {
-                Title = LocalizationHelper.GetString("AppNotification_LocalCommandDenied_Title"),
-                Message = BuildLocalDenyNotificationMessage(args.Request),
-                Source = "exec-approval",
-                Category = "node.invoke",
-                Severity = AppNotificationSeverity.Warning,
-                DedupeKey = BuildLocalDenyDedupeKey(args.Request)
-            });
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"Failed to post local-deny app notification: {ex.Message}");
-        }
-    }
-
-    private static string BuildLocalApprovalPendingNotificationMessage(ExecApprovalPromptRequest request)
-    {
-        var session = FormatSessionKeyForNotification(request.SessionKey);
-        var command = string.IsNullOrWhiteSpace(request.Command)
-            ? LocalizationHelper.GetString("AppNotification_LocalCommandDenied_UnknownCommandSubject")
-            : CompactNotificationText(request.Command.Trim());
-        return LocalizationHelper.Format(
-            "AppNotification_ExecApprovalPending_MessageFormat",
-            session,
-            command);
-    }
-
-    private static string FormatSessionKeyForNotification(string? sessionKey)
-    {
-        if (string.IsNullOrWhiteSpace(sessionKey))
-            return LocalizationHelper.GetString("AppNotification_ExecApprovalPending_UnknownChatLabel");
-
-        var parts = sessionKey.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length >= 3 && string.Equals(parts[0], "agent", StringComparison.OrdinalIgnoreCase))
-        {
-            var agent = FormatSessionSegment(parts[1]);
-            var slot = FormatSessionSegment(parts[2]);
-            var main = LocalizationHelper.GetString("AppNotification_ExecApprovalPending_MainSessionLabel");
-            var isMainAgent = string.Equals(parts[1], "main", StringComparison.OrdinalIgnoreCase);
-            var isMainSlot = string.Equals(parts[2], "main", StringComparison.OrdinalIgnoreCase);
-            var isDefaultSlot = string.Equals(parts[2], "default", StringComparison.OrdinalIgnoreCase);
-
-            if (isMainAgent && isMainSlot)
-                return LocalizationHelper.GetString("AppNotification_ExecApprovalPending_MainChatLabel");
-
-            if (isMainSlot || isDefaultSlot)
-            {
-                return LocalizationHelper.Format(
-                    "AppNotification_ExecApprovalPending_AgentChatLabelFormat",
-                    isMainAgent ? main : agent);
-            }
-
-            return LocalizationHelper.Format(
-                "AppNotification_ExecApprovalPending_AgentSlotLabelFormat",
-                isMainAgent ? main : agent,
-                slot);
-        }
-
-        return CompactNotificationText(sessionKey);
-    }
-
-    private static string FormatSessionSegment(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return LocalizationHelper.GetString("AppNotification_ExecApprovalPending_UnknownChatLabel");
-
-        var words = value.Replace('-', ' ').Replace('_', ' ');
-        return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(words.ToLower(CultureInfo.CurrentCulture));
-    }
-
-    private static string BuildLocalApprovalPendingNotificationId(ExecApprovalPromptRequest request) =>
-        "exec-approval-pending-" + HashNotificationKey(BuildLocalApprovalPendingDedupeKey(request));
-
-    private static string BuildLocalApprovalPendingDedupeKey(ExecApprovalPromptRequest request)
-    {
-        return string.Join("|",
-            "exec-approval-pending",
-            request.SessionKey ?? "",
-            request.CorrelationId ?? "",
-            request.Command ?? "",
-            request.Shell ?? "");
-    }
-
     private static string HashNotificationKey(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
-
-    private static string BuildLocalDenyNotificationMessage(ExecApprovalPromptRequest request)
-    {
-        var subject = string.IsNullOrWhiteSpace(request.Command)
-            ? LocalizationHelper.GetString("AppNotification_LocalCommandDenied_UnknownCommandSubject")
-            : LocalizationHelper.Format(
-                "AppNotification_LocalCommandDenied_CommandSubjectFormat",
-                CompactNotificationText(request.Command.Trim()));
-
-        string message;
-        if (!string.IsNullOrWhiteSpace(request.Reason))
-        {
-            message = LocalizationHelper.Format(
-                "AppNotification_LocalCommandDenied_MessageFormat",
-                subject,
-                CompactNotificationText(request.Reason.Trim()));
-        }
-        else
-        {
-            message = LocalizationHelper.Format(
-                "AppNotification_LocalCommandDenied_MessageNoReasonFormat",
-                subject);
-        }
-
-        if (!string.IsNullOrWhiteSpace(request.MatchedPattern))
-        {
-            message += " " + LocalizationHelper.Format(
-                "AppNotification_LocalCommandDenied_PatternSuffixFormat",
-                CompactNotificationText(request.MatchedPattern.Trim()));
-        }
-
-        return message;
-    }
-
-    private static string CompactNotificationText(string text)
-    {
-        const int maxLength = 240;
-        if (text.Length <= maxLength)
-            return text;
-        return text[..(maxLength - 1)] + "…";
-    }
-
-    private static string BuildLocalDenyDedupeKey(ExecApprovalPromptRequest request)
-    {
-        var command = request.Command?.Trim() ?? string.Empty;
-        var reason = request.Reason?.Trim() ?? string.Empty;
-        var pattern = request.MatchedPattern?.Trim() ?? string.Empty;
-        return $"exec-denied:{command}:{reason}:{pattern}";
-    }
 
     private void OnNodeInvokeCompleted(object? sender, NodeInvokeCompletedEventArgs args)
     {
@@ -3419,7 +3403,7 @@ public partial class App :
             };
             _hubWindow.DisconnectAction = () =>
             {
-                _ = _connectionManager?.DisconnectAsync();
+                _ = _connectionManager?.DisconnectByUserAsync();
                 // Status is updated by OnManagerStateChanged when disconnect completes.
                 UpdateTrayIcon();
             };
@@ -3515,6 +3499,12 @@ public partial class App :
 
     private void OnSettingsSaved(object? sender, EventArgs e)
     {
+        if (_settings is not null)
+        {
+            OpenClawTray.Chat.OpenClawReactorChatRoot.SetToolCallsVisible(
+                _settings.ShowChatToolCalls);
+        }
+
         var currentSnapshot = _settings?.ToSettingsData()?.ToConnectionSnapshot();
         var impact = SettingsChangeClassifier.Classify(_previousSettingsSnapshot, currentSnapshot);
         _previousSettingsSnapshot = currentSnapshot;
@@ -4129,6 +4119,8 @@ public partial class App :
             _settings.GetEffectiveGatewayUrl(),
             _settings.LegacyToken,
             _settings.LegacyBootstrapToken,
+            (record, candidate) =>
+                _managedLocalPortProvenance?.IsStrongCredentialAllowed(record, candidate) == true,
             out var credential) ||
             credential == null)
         {
@@ -4186,7 +4178,7 @@ public partial class App :
     void IAppCommands.Reconnect() => ReconnectWithSyncedBrowserProxyForward();
     void IAppCommands.Disconnect()
     {
-        _ = _connectionManager?.DisconnectAsync();
+        _ = _connectionManager?.DisconnectByUserAsync();
         UpdateTrayIcon();
     }
     void IAppCommands.ShowVoiceOverlay() => ShowHub("voice");
@@ -4562,9 +4554,6 @@ public partial class App :
 
     /// <summary>
     /// Sets speaker mute from any surface (chat window, chat page, voice settings) and persists it.
-    /// This public path is NOT store-self-write-suppressed, so an open Settings page still reflects
-    /// a mute toggled elsewhere. The Settings-page-originated call goes through the explicit
-    /// <see cref="IAppCommands.SetChatSpeakerMuted"/> below, which suppresses its own echo.
     /// </summary>
     public void SetChatSpeakerMuted(bool muted)
     {
@@ -4578,26 +4567,6 @@ public partial class App :
         // Broadcast to all subscribers
         SpeakerMuteChanged?.Invoke(muted);
     }
-
-    /// <summary>
-    /// Settings-page-originated mute: wraps the shared write in a store self-write so it does not
-    /// echo an external-change reload back to the Settings view model that triggered it.
-    /// </summary>
-    void IAppCommands.SetChatSpeakerMuted(bool muted)
-    {
-        using (SettingsStore?.BeginSelfWrite())
-        {
-            SetChatSpeakerMuted(muted);
-        }
-    }
-
-    /// <summary>
-    /// Pushes tool-call visibility into the live chat timeline. Forwards to the shared
-    /// static writer so a WinUI-free settings view model can drive it through IAppCommands
-    /// without referencing the chat UI directly.
-    /// </summary>
-    public void SetChatToolCallsVisible(bool visible) =>
-        OpenClawTray.Chat.OpenClawChatRoot.SetToolCallsVisible(visible);
 
     private static void SendDeepLinkToRunningInstance(string uri)
     {
@@ -4677,7 +4646,18 @@ public partial class App :
             _chatCoordinator = null;
         });
 
-        // Dispose runtime services
+        // Dispose runtime services. Stop the auto-repair monitor BEFORE the connection manager so an
+        // in-flight repair cannot drive a reconnect into a disposing manager.
+        var autoRepairMonitor = _managedLocalAutoRepairMonitor;
+        if (autoRepairMonitor != null)
+        {
+            await SafeShutdownStepAsync("managed-local auto-repair monitor", async () =>
+            {
+                await autoRepairMonitor.DisposeAsync();
+            });
+            _managedLocalAutoRepairMonitor = null;
+        }
+
         var connectionManager = _connectionManager;
         if (connectionManager != null)
         {

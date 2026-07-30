@@ -109,8 +109,6 @@ public sealed record SettingsSnapshot
     public bool ScreenRecordingConsentGiven { get; init; }
     public bool CameraRecordingConsentGiven { get; init; }
 
-    /// <summary>Reflects <c>VoiceTtsEnabled</c>; the "read responses aloud" toggle mirrors it.</summary>
-    public bool VoiceTtsEnabled { get; init; }
     public bool ShowChatToolCalls { get; init; }
     public string VoiceAssistantMode { get; init; } = VoiceAssistantSettingsPolicy.OffMode;
     public string VoiceAssistantWakePhrase { get; init; } = VoiceAssistantSettingsPolicy.DefaultWakePhrase;

@@ -178,6 +178,7 @@ Privacy and V0 limits:
 ### Node doesn't connect
 - Check the active gateway in Connection settings. Gateway records live in `%APPDATA%\OpenClawTray\gateways.json`; post-pairing device tokens live under `%APPDATA%\OpenClawTray\gateways\<gateway-id>\device-key-ed25519.json`.
 - Check logs for connection errors
+- If logs report that the saved device identity could not be loaded, fix access to the existing identity file or use an explicit reset/re-pair action. The tray preserves an unreadable or corrupt identity instead of replacing it automatically.
 - Verify gateway is running and accessible
 - If only a bootstrap token exists, finish pairing or approve the device; paired device tokens take precedence on future connects.
 
