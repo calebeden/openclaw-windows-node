@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using OpenClaw.Chat;
 using OpenClaw.Shared;
 using OpenClawTray.Chat;
 
@@ -10,14 +11,20 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
     private readonly OpenClawChatDataProvider _provider;
     private readonly ConcurrentDictionary<string, ResponseIdentity> _responses = new(StringComparer.Ordinal);
     private readonly object _canceledGate = new();
+    private readonly object _readinessGate = new();
     private readonly Queue<string> _canceledOrder = new();
     private readonly HashSet<string> _canceled = new(StringComparer.Ordinal);
+    private string? _lastReadySessionKey;
 
     public VoiceAssistantChatTurnClient(OpenClawChatDataProvider provider)
     {
         _provider = provider;
+        _provider.Changed += OnProviderChanged;
+        _lastReadySessionKey = _provider.GetVoiceAssistantReadySessionKey();
         _provider.VoiceAssistantResponseObserved += OnResponseObserved;
     }
+
+    public event Action? ReadinessChanged;
 
     public string? GetReadySessionKey() => _provider.GetVoiceAssistantReadySessionKey();
 
@@ -89,6 +96,20 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
             response.ResponseText);
     }
 
+    private void OnProviderChanged(object? sender, ChatDataChangedEventArgs args)
+    {
+        var readySessionKey = _provider.GetVoiceAssistantReadySessionKey();
+        lock (_readinessGate)
+        {
+            if (string.Equals(_lastReadySessionKey, readySessionKey, StringComparison.Ordinal))
+                return;
+
+            _lastReadySessionKey = readySessionKey;
+        }
+
+        ReadinessChanged?.Invoke();
+    }
+
     private void RememberCanceled(string localMessageId)
     {
         lock (_canceledGate)
@@ -104,6 +125,7 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
 
     public void Dispose()
     {
+        _provider.Changed -= OnProviderChanged;
         _provider.VoiceAssistantResponseObserved -= OnResponseObserved;
         _responses.Clear();
         lock (_canceledGate)

@@ -42,6 +42,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
         _replyTimeout = replyTimeout ?? TimeSpan.FromSeconds(120);
         _input.UtteranceCompleted += OnUtteranceCompleted;
         _input.CaptureAvailable += OnCaptureAvailable;
+        _chat.ReadinessChanged += OnChatReadinessChanged;
     }
 
     public VoiceAssistantState State
@@ -343,6 +344,8 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
 
     private void OnCaptureAvailable() => _ = ReconcileCoreAsync();
 
+    private void OnChatReadinessChanged() => _ = ReconcileCoreAsync();
+
     private static string? GetIdentity(OpenClawNotification notification) =>
         !string.IsNullOrWhiteSpace(notification.SessionKey) &&
         !string.IsNullOrWhiteSpace(notification.OpenClawId) &&
@@ -398,6 +401,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
 
         _input.UtteranceCompleted -= OnUtteranceCompleted;
         _input.CaptureAvailable -= OnCaptureAvailable;
+        _chat.ReadinessChanged -= OnChatReadinessChanged;
         _lifetime.Cancel();
         await _input.StopAsync().ConfigureAwait(false);
         if (activeTurn is not null)

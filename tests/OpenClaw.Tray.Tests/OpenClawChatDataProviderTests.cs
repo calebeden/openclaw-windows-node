@@ -271,6 +271,32 @@ public class OpenClawChatDataProviderTests
         new() { Key = "main", IsMain = true, DisplayName = "Main session", Status = "active" };
 
     [Fact]
+    public async Task VoiceAssistantReadinessChanged_TracksSessionsAndDisconnect()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        var readinessChanges = 0;
+        adapter.ReadinessChanged += () => readinessChanges++;
+
+        bridge.RaiseSessions(bridge.Sessions);
+        bridge.RaiseSessions(bridge.Sessions);
+        bridge.RaiseStatus(ConnectionStatus.Disconnected);
+        bridge.RaiseStatus(ConnectionStatus.Connected);
+        bridge.RaiseSessions(bridge.Sessions);
+
+        Assert.Equal(3, readinessChanges);
+        Assert.Equal("main", adapter.GetReadySessionKey());
+    }
+
+    [Fact]
     public async Task VoiceAssistant_FinalWithoutGatewayMetadata_CorrelatesByTrackedText()
     {
         var bridge = new FakeBridge

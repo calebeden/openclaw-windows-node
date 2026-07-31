@@ -230,6 +230,30 @@ public sealed class VoiceAssistantCoordinatorTests
         Assert.Equal(1, chat.Canceled);
     }
 
+    [Fact]
+    public async Task StartupReadinessArrival_StartsWakeListeningWithoutSettingsToggle()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat { ReadySessionKey = null };
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+
+        await coordinator.ReconcileAsync();
+        Assert.Equal(VoiceAssistantState.Unavailable, coordinator.State);
+
+        chat.SetReadySessionKey("main");
+
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+        Assert.Equal(1, input.Starts);
+
+        chat.SetReadySessionKey(null);
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.Unavailable);
+        chat.SetReadySessionKey("main");
+
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+        Assert.Equal(2, input.Starts);
+    }
+
     private static VoiceAssistantCoordinator Create(
         FakeInput input,
         FakeChat chat,
@@ -288,7 +312,15 @@ public sealed class VoiceAssistantCoordinatorTests
         public List<string> Requests { get; } = new();
         public int Canceled { get; private set; }
 
+        public event Action? ReadinessChanged;
+
         public string? GetReadySessionKey() => ReadySessionKey;
+
+        public void SetReadySessionKey(string? sessionKey)
+        {
+            ReadySessionKey = sessionKey;
+            ReadinessChanged?.Invoke();
+        }
 
         public Task<VoiceAssistantTurnReceipt> SendAsync(
             string sessionKey,

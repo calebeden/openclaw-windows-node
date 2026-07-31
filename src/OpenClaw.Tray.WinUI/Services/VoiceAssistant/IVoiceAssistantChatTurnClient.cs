@@ -17,6 +17,8 @@ public sealed record VoiceAssistantTurnReceipt(
 
 public interface IVoiceAssistantChatTurnClient
 {
+    event Action? ReadinessChanged;
+
     string? GetReadySessionKey();
 
     Task<VoiceAssistantTurnReceipt> SendAsync(
