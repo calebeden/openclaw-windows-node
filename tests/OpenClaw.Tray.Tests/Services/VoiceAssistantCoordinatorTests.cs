@@ -19,7 +19,7 @@ public sealed class VoiceAssistantCoordinatorTests
         input.Emit("OpenClaw, second request");
         await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WaitingForReply);
 
-        Assert.Equal(new[] { "first request" }, chat.Requests);
+        Assert.Equal(new[] { "First request" }, chat.Requests);
     }
 
     [Fact]

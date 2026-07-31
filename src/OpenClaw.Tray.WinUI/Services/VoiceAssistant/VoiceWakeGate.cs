@@ -37,8 +37,19 @@ public static class VoiceWakeGate
         if (requestStart >= transcript.Length)
             return false;
 
-        request = transcript[requestStart..].Trim();
+        request = CapitalizeFirstCharacter(transcript[requestStart..].Trim());
         return request.Any(char.IsLetterOrDigit);
+    }
+
+    private static string CapitalizeFirstCharacter(string value)
+    {
+        if (value.Length == 0)
+            return value;
+
+        var uppercase = char.ToUpperInvariant(value[0]);
+        return uppercase == value[0]
+            ? value
+            : uppercase + value[1..];
     }
 
     private static List<Token> Tokenize(string value)
