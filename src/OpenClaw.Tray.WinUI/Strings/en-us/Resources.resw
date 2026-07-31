@@ -2978,6 +2978,12 @@ Use one of these options:
   <data name="Chat_Composer_Tooltip_Voice" xml:space="preserve">
     <value>Voice</value>
   </data>
+  <data name="Chat_Composer_VoiceUnavailable_AssistantListening" xml:space="preserve">
+    <value>Voice input unavailable while Assistant is listening for the wake phrase.</value>
+  </data>
+  <data name="Chat_Composer_Status_AssistantListening" xml:space="preserve">
+    <value>Assistant is listening for the wake phrase.</value>
+  </data>
   <data name="Chat_Voice_ListeningPrompt" xml:space="preserve">
     <value>Listening…</value>
   </data>

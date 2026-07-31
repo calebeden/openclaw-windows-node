@@ -2931,6 +2931,12 @@
   <data name="Chat_Composer_Tooltip_Voice" xml:space="preserve">
     <value>語音</value>
   </data>
+  <data name="Chat_Composer_VoiceUnavailable_AssistantListening" xml:space="preserve">
+    <value>助理正在聆聽喚醒短語，語音輸入暫時無法使用。</value>
+  </data>
+  <data name="Chat_Composer_Status_AssistantListening" xml:space="preserve">
+    <value>助理正在聆聽喚醒短語。</value>
+  </data>
   <data name="Chat_Voice_ListeningPrompt" xml:space="preserve">
     <value>正在聆聽…</value>
   </data>

@@ -61,6 +61,30 @@ public sealed class SpeechInputContractTests
     }
 
     [Fact]
+    public void ChatComposer_ExplainsAssistantWakeListeningMicrophoneOwnership()
+    {
+        var composer = Read("src", "OpenClaw.Tray.WinUI", "Chat", "OpenClawReactorChatRoot.cs");
+        var host = Read("src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatHostExtensions.cs");
+        var chatPage = Read("src", "OpenClaw.Tray.WinUI", "Pages", "ChatPage.xaml.cs");
+        var chatWindow = Read("src", "OpenClaw.Tray.WinUI", "Windows", "ChatWindow.xaml.cs");
+        var resources = Read("src", "OpenClaw.Tray.WinUI", "Strings", "en-us", "Resources.resw");
+
+        Assert.Contains("props.VoiceUnavailableReason is null", composer);
+        Assert.Contains("props.VoiceUnavailableStatus is { } voiceUnavailableStatus", composer);
+        Assert.Contains("SetName(", composer);
+        Assert.Contains("SetHelpText(", composer);
+        Assert.Contains("AutomationLiveSetting.Polite", composer);
+        Assert.Contains("SetVoiceAvailability", host);
+        Assert.Contains("VoiceAssistantRuntimeStateChanged", chatPage);
+        Assert.Contains("VoiceAssistantRuntimeStateChanged", chatWindow);
+        Assert.Contains(
+            "ChatHost.Visibility = Visibility.Visible;\r\n            UpdateVoiceAvailability();",
+            chatPage);
+        Assert.Contains("Voice input unavailable while Assistant is listening for the wake phrase.", resources);
+        Assert.Contains("Assistant is listening for the wake phrase.", resources);
+    }
+
+    [Fact]
     public void ChatVoiceDialogs_RouteDisabledTtsCapabilityToPermissions_AndPreserveFallbackForMissingSetup()
     {
         var chatPage = Read("src", "OpenClaw.Tray.WinUI", "Pages", "ChatPage.xaml.cs");

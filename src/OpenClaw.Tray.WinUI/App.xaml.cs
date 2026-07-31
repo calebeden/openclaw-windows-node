@@ -4876,6 +4876,16 @@ public partial class App :
     }
 
     private event EventHandler? VoiceAssistantSettingsChanged;
+    internal event EventHandler? VoiceAssistantRuntimeStateChanged;
+
+    internal VoiceAssistantState VoiceAssistantRuntimeState =>
+        _voiceAssistantCoordinator?.State ??
+        (string.Equals(
+            _settings?.VoiceAssistantMode,
+            VoiceAssistantSettingsPolicy.WakeOneShotMode,
+            StringComparison.Ordinal)
+                ? VoiceAssistantState.Unavailable
+                : VoiceAssistantState.Off);
 
     event EventHandler? IVoiceAssistantSettingsEnvironment.Changed
     {
@@ -4884,13 +4894,7 @@ public partial class App :
     }
 
     VoiceAssistantState IVoiceAssistantSettingsEnvironment.RuntimeState =>
-        _voiceAssistantCoordinator?.State ??
-        (string.Equals(
-            _settings?.VoiceAssistantMode,
-            VoiceAssistantSettingsPolicy.WakeOneShotMode,
-            StringComparison.Ordinal)
-                ? VoiceAssistantState.Unavailable
-                : VoiceAssistantState.Off);
+        VoiceAssistantRuntimeState;
 
     VoiceAssistantReadinessResult IVoiceAssistantSettingsEnvironment.GetReadiness(string wakePhrase) =>
         _settings is { } settings
@@ -4904,7 +4908,11 @@ public partial class App :
         RaiseVoiceAssistantSettingsChanged();
 
     private void RaiseVoiceAssistantSettingsChanged() =>
-        OnUiThread(() => VoiceAssistantSettingsChanged?.Invoke(this, EventArgs.Empty));
+        OnUiThread(() =>
+        {
+            VoiceAssistantSettingsChanged?.Invoke(this, EventArgs.Empty);
+            VoiceAssistantRuntimeStateChanged?.Invoke(this, EventArgs.Empty);
+        });
 
     private static void CloseWindow(Window? window)
     {

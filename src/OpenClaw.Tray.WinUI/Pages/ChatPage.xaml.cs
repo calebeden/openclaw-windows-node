@@ -7,6 +7,7 @@ using OpenClaw.Shared.Capabilities;
 using OpenClawTray.Chat;
 using OpenClawTray.Helpers;
 using OpenClawTray.Services;
+using OpenClawTray.Services.VoiceAssistant;
 using OpenClawTray.Windows;
 using OpenClaw.Connection;
 using System;
@@ -80,7 +81,10 @@ public sealed partial class ChatPage : Page
             app.ChatProviderChanged -= OnAppChatProviderChanged;
 
         if (App.Current is App app2)
+        {
             app2.SpeakerMuteChanged -= OnSpeakerMuteChanged;
+            app2.VoiceAssistantRuntimeStateChanged -= OnVoiceAssistantRuntimeStateChanged;
+        }
 
         // MEDIUM 6: detach the static debug-override subscription so that
         // an unloaded ChatPage doesn't keep responding to overrides changes
@@ -144,6 +148,8 @@ public sealed partial class ChatPage : Page
             app.ChatProviderChanged += OnAppChatProviderChanged;
             app.SpeakerMuteChanged -= OnSpeakerMuteChanged;
             app.SpeakerMuteChanged += OnSpeakerMuteChanged;
+            app.VoiceAssistantRuntimeStateChanged -= OnVoiceAssistantRuntimeStateChanged;
+            app.VoiceAssistantRuntimeStateChanged += OnVoiceAssistantRuntimeStateChanged;
         }
 
         // Also react to the per-surface debug override picked from DebugPage.
@@ -160,6 +166,24 @@ public sealed partial class ChatPage : Page
     private void OnSpeakerMuteChanged(bool muted)
     {
         DispatcherQueue?.TryEnqueue(() => _reactorHost?.SetSpeakerMuted(muted));
+    }
+
+    private void OnVoiceAssistantRuntimeStateChanged(object? sender, EventArgs e)
+    {
+        DispatcherQueue?.TryEnqueue(UpdateVoiceAvailability);
+    }
+
+    private void UpdateVoiceAvailability()
+    {
+        var unavailable = VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+            CurrentApp.VoiceAssistantRuntimeState);
+        _reactorHost?.SetVoiceAvailability(
+            unavailable
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningReasonKey)
+                : null,
+            unavailable
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningStatusKey)
+                : null);
     }
 
     private void OnAppChatProviderChanged(object? sender, EventArgs e)
@@ -260,6 +284,7 @@ public sealed partial class ChatPage : Page
         {
             PlaceholderPanel.Visibility = Visibility.Collapsed;
             ChatHost.Visibility = Visibility.Visible;
+            UpdateVoiceAvailability();
             UpdateNativeChatSurfaceActive();
             // Check for pending auto-start voice even when already mounted
             if (_hub?.PendingAutoStartVoice == true)
@@ -298,6 +323,14 @@ public sealed partial class ChatPage : Page
             onAttachClick: OnAttachClicked,
             onSettingsClick: () => _hub?.NavigateTo("voice"),
             onSpeakerMuteChanged: muted => _ = OnSpeakerMuteChangedAsync(muted),
+            initialVoiceUnavailableReason: VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+                    CurrentApp.VoiceAssistantRuntimeState)
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningReasonKey)
+                : null,
+            initialVoiceUnavailableStatus: VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+                    CurrentApp.VoiceAssistantRuntimeState)
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningStatusKey)
+                : null,
             initialMuted: ShouldStartSpeakerMuted(CurrentApp.Settings));
         _mountedProvider = provider;
         _mountedThreadId = threadIdToMount;

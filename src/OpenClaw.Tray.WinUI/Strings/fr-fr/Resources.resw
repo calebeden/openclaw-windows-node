@@ -2931,6 +2931,12 @@ Utilisez l'une de ces options :
   <data name="Chat_Composer_Tooltip_Voice" xml:space="preserve">
     <value>Voix</value>
   </data>
+  <data name="Chat_Composer_VoiceUnavailable_AssistantListening" xml:space="preserve">
+    <value>La saisie vocale est indisponible pendant que l’Assistant écoute la phrase d’activation.</value>
+  </data>
+  <data name="Chat_Composer_Status_AssistantListening" xml:space="preserve">
+    <value>L’Assistant écoute la phrase d’activation.</value>
+  </data>
   <data name="Chat_Voice_ListeningPrompt" xml:space="preserve">
     <value>Écoute…</value>
   </data>

@@ -8,6 +8,7 @@ using OpenClaw.Shared;
 using OpenClawTray.Chat;
 using OpenClawTray.Helpers;
 using OpenClawTray.Services;
+using OpenClawTray.Services.VoiceAssistant;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -126,6 +127,7 @@ public sealed partial class ChatWindow : WindowEx
             app.SettingsChanged += OnAppSettingsChanged;
             app.ChatProviderChanged += OnAppChatProviderChanged;
             app.SpeakerMuteChanged += OnSpeakerMuteChanged;
+            app.VoiceAssistantRuntimeStateChanged += OnVoiceAssistantRuntimeStateChanged;
         }
 
         // Per-surface debug override (DebugPage > "Debug Overrides").
@@ -144,6 +146,27 @@ public sealed partial class ChatWindow : WindowEx
     private void OnSpeakerMuteChanged(bool muted)
     {
         DispatcherQueue?.TryEnqueue(() => _reactorHost?.SetSpeakerMuted(muted));
+    }
+
+    private void OnVoiceAssistantRuntimeStateChanged(object? sender, EventArgs e)
+    {
+        DispatcherQueue?.TryEnqueue(UpdateVoiceAvailability);
+    }
+
+    private void UpdateVoiceAvailability()
+    {
+        if (App.Current is not App app)
+            return;
+
+        var unavailable = VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+            app.VoiceAssistantRuntimeState);
+        _reactorHost?.SetVoiceAvailability(
+            unavailable
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningReasonKey)
+                : null,
+            unavailable
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningStatusKey)
+                : null);
     }
 
     private void OnAppChatProviderChanged(object? sender, EventArgs e)
@@ -436,6 +459,14 @@ public sealed partial class ChatWindow : WindowEx
             onAttachClick: OnAttachClicked,
             onSettingsClick: () => appInstance?.ShowHub("voice"),
             onSpeakerMuteChanged: muted => _ = OnSpeakerMuteChangedAsync(muted),
+            initialVoiceUnavailableReason: VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+                    appInstance?.VoiceAssistantRuntimeState ?? VoiceAssistantState.Off)
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningReasonKey)
+                : null,
+            initialVoiceUnavailableStatus: VoiceAssistantChatInputPolicy.IsVoiceInputUnavailable(
+                    appInstance?.VoiceAssistantRuntimeState ?? VoiceAssistantState.Off)
+                ? LocalizationHelper.GetString(VoiceAssistantChatInputPolicy.WakeListeningStatusKey)
+                : null,
             initialMuted: ShouldStartSpeakerMuted(appInstance?.Settings),
             isCompact: true);
         _mountedProvider = provider;
@@ -834,6 +865,7 @@ public sealed partial class ChatWindow : WindowEx
             app.SettingsChanged -= OnAppSettingsChanged;
             app.ChatProviderChanged -= OnAppChatProviderChanged;
             app.SpeakerMuteChanged -= OnSpeakerMuteChanged;
+            app.VoiceAssistantRuntimeStateChanged -= OnVoiceAssistantRuntimeStateChanged;
         }
         OpenClawTray.Chat.DebugChatSurfaceOverrides.Changed -= OnDebugOverrideChanged;
         IsClosed = true;

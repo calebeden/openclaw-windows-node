@@ -2932,6 +2932,12 @@ Gebruik een van deze opties:
   <data name="Chat_Composer_Tooltip_Voice" xml:space="preserve">
     <value>Stem</value>
   </data>
+  <data name="Chat_Composer_VoiceUnavailable_AssistantListening" xml:space="preserve">
+    <value>Spraakinvoer is niet beschikbaar terwijl Assistent naar de activeringszin luistert.</value>
+  </data>
+  <data name="Chat_Composer_Status_AssistantListening" xml:space="preserve">
+    <value>Assistent luistert naar de activeringszin.</value>
+  </data>
   <data name="Chat_Voice_ListeningPrompt" xml:space="preserve">
     <value>Luisteren…</value>
   </data>
