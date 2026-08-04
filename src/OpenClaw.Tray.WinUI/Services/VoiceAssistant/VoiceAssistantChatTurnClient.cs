@@ -14,19 +14,22 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
     private readonly object _readinessGate = new();
     private readonly Queue<string> _canceledOrder = new();
     private readonly HashSet<string> _canceled = new(StringComparer.Ordinal);
-    private string? _lastReadySessionKey;
+    private VoiceAssistantAvailability _lastAvailability;
 
     public VoiceAssistantChatTurnClient(OpenClawChatDataProvider provider)
     {
         _provider = provider;
         _provider.Changed += OnProviderChanged;
-        _lastReadySessionKey = _provider.GetVoiceAssistantReadySessionKey();
+        _lastAvailability = _provider.GetVoiceAssistantAvailability();
         _provider.VoiceAssistantResponseObserved += OnResponseObserved;
+        _provider.VoiceAssistantTurnInvalidated += OnTurnInvalidated;
     }
 
     public event Action? ReadinessChanged;
+    public event Action<VoiceAssistantTurnInvalidation>? TurnInvalidated;
 
     public string? GetReadySessionKey() => _provider.GetVoiceAssistantReadySessionKey();
+    public VoiceAssistantAvailability GetAvailability() => _provider.GetVoiceAssistantAvailability();
 
     public Task<VoiceAssistantTurnReceipt> SendAsync(
         string sessionKey,
@@ -43,12 +46,19 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
         await _provider.CancelVoiceAssistantTurnAsync(receipt, cancellationToken).ConfigureAwait(false);
     }
 
+    public bool IsTurnInvalidated(VoiceAssistantTurnReceipt receipt)
+    {
+        lock (_canceledGate)
+            return _canceled.Contains(receipt.LocalMessageId);
+    }
+
     public bool IsResponseForTurn(
         VoiceAssistantTurnReceipt receipt,
         OpenClawNotification notification)
     {
         if (!_responses.TryGetValue(receipt.LocalMessageId, out var response) ||
-            !string.Equals(response.SessionKey, notification.SessionKey, StringComparison.Ordinal))
+            !string.Equals(response.SessionKey, notification.SessionKey, StringComparison.Ordinal) ||
+            !string.Equals(response.GatewayRunId, receipt.GatewayRunId, StringComparison.Ordinal))
         {
             return false;
         }
@@ -91,20 +101,31 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
 
         _responses[response.LocalMessageId] = new ResponseIdentity(
             response.SessionKey,
+            response.GatewayRunId,
             response.GatewayMessageId,
             response.GatewaySequence,
             response.ResponseText);
     }
 
+    private void OnTurnInvalidated(OpenClawChatDataProvider.VoiceAssistantTurnInvalidation invalidation)
+    {
+        RememberCanceled(invalidation.LocalMessageId);
+        _responses.TryRemove(invalidation.LocalMessageId, out _);
+        TurnInvalidated?.Invoke(new VoiceAssistantTurnInvalidation(
+            invalidation.SessionKey,
+            invalidation.GatewayRunId,
+            invalidation.LocalMessageId));
+    }
+
     private void OnProviderChanged(object? sender, ChatDataChangedEventArgs args)
     {
-        var readySessionKey = _provider.GetVoiceAssistantReadySessionKey();
+        var availability = _provider.GetVoiceAssistantAvailability();
         lock (_readinessGate)
         {
-            if (string.Equals(_lastReadySessionKey, readySessionKey, StringComparison.Ordinal))
+            if (_lastAvailability == availability)
                 return;
 
-            _lastReadySessionKey = readySessionKey;
+            _lastAvailability = availability;
         }
 
         ReadinessChanged?.Invoke();
@@ -127,6 +148,7 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
     {
         _provider.Changed -= OnProviderChanged;
         _provider.VoiceAssistantResponseObserved -= OnResponseObserved;
+        _provider.VoiceAssistantTurnInvalidated -= OnTurnInvalidated;
         _responses.Clear();
         lock (_canceledGate)
         {
@@ -137,6 +159,7 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
 
     private sealed record ResponseIdentity(
         string SessionKey,
+        string GatewayRunId,
         string? GatewayMessageId,
         int? GatewaySequence,
         string ResponseText);

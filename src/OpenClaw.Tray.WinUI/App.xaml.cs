@@ -2920,12 +2920,13 @@ public partial class App :
         if (notification.IsChat && !string.IsNullOrEmpty(notification.Message))
         {
             var speechText = ChatNotificationSpeechText.Resolve(notification);
-            var claimedByVoiceAssistant =
-                _voiceAssistantCoordinator?.TryClaimResponse(notification) == true;
 
             // Suppress TTS/voice overlay when the user has aborted the response.
-            if (ChatProvider?.IsResponseSuppressed == true)
+            if (ChatProvider?.IsResponseSuppressedForSession(notification.SessionKey) == true)
                 return;
+
+            var claimedByVoiceAssistant =
+                _voiceAssistantCoordinator?.TryClaimResponse(notification) == true;
 
             // Voice overlay disabled — agent responses no longer routed to overlay window.
             // if (_voiceOverlayWindow != null)
@@ -4820,6 +4821,16 @@ public partial class App :
         await _voiceAssistantLifecycleGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            var enabled = string.Equals(
+                _settings?.VoiceAssistantMode,
+                VoiceAssistantSettingsPolicy.WakeOneShotMode,
+                StringComparison.Ordinal);
+            if (!enabled)
+            {
+                await DisposeVoiceAssistantCoordinatorCoreAsync().ConfigureAwait(false);
+                return;
+            }
+
             if (_voiceAssistantCoordinator is not null)
             {
                 await _voiceAssistantCoordinator.ReconcileAsync().ConfigureAwait(false);
@@ -4828,11 +4839,7 @@ public partial class App :
             }
 
             needsBuild =
-                !_isExiting &&
-                string.Equals(
-                    _settings?.VoiceAssistantMode,
-                    VoiceAssistantSettingsPolicy.WakeOneShotMode,
-                    StringComparison.Ordinal);
+                !_isExiting;
         }
         finally
         {

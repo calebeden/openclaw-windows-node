@@ -11,6 +11,14 @@ public sealed class AppRefactorContractTests
 
         Assert.Contains("_voiceAssistantCoordinator?.TryClaimResponse(notification)", source);
         Assert.Contains("new VoiceAssistantCoordinator(", source);
+        Assert.Matches(
+            new Regex(
+                @"if\s*\(!enabled\)\s*\{\s*await DisposeVoiceAssistantCoordinatorCoreAsync\(\)",
+                RegexOptions.Multiline),
+            source);
+        Assert.Contains("_voiceAssistantCoordinator = null;", source);
+        Assert.Contains("_voiceAssistantChatTurnClient = null;", source);
+        Assert.Contains("_voiceAssistantInput = null;", source);
         Assert.DoesNotContain("enum VoiceAssistantState", source);
         Assert.DoesNotContain("VoiceAssistantState.Dispatching", source);
         Assert.DoesNotContain("VoiceAssistantState.WaitingForReply", source);

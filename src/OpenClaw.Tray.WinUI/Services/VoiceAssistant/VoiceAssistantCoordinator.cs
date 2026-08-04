@@ -22,10 +22,12 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Queue<string> _consumedOrder = new();
     private readonly HashSet<string> _consumed = new(StringComparer.Ordinal);
+    private readonly Queue<VoiceAssistantState> _pendingStateNotifications = new();
     private CancellationTokenSource? _turnCancellation;
     private CancellationTokenSource? _replyTimeoutCancellation;
     private VoiceAssistantTurnReceipt? _activeTurn;
     private VoiceAssistantState _state = VoiceAssistantState.Off;
+    private bool _stateNotificationDrainActive;
     private bool _disposed;
 
     public VoiceAssistantCoordinator(
@@ -43,6 +45,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
         _input.UtteranceCompleted += OnUtteranceCompleted;
         _input.CaptureAvailable += OnCaptureAvailable;
         _chat.ReadinessChanged += OnChatReadinessChanged;
+        _chat.TurnInvalidated += OnTurnInvalidated;
     }
 
     public VoiceAssistantState State
@@ -66,6 +69,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
         var fallbackSignature = GetFallbackSignature(notification);
         VoiceAssistantTurnReceipt? receipt;
         CancellationToken turnCancellation;
+        bool drainStateNotifications;
 
         lock (_gate)
         {
@@ -100,12 +104,13 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
                 return false;
 
             AddConsumedLocked(identity);
-            _state = VoiceAssistantState.Speaking;
+            drainStateNotifications = SetStateLocked(VoiceAssistantState.Speaking);
             turnCancellation = _turnCancellation?.Token ?? _lifetime.Token;
             _replyTimeoutCancellation?.Cancel();
         }
 
-        StateChanged?.Invoke(VoiceAssistantState.Speaking);
+        if (drainStateNotifications)
+            DrainStateNotifications();
         _ = SpeakAndResumeAsync(
             notification.FullMessage ?? notification.Message,
             receipt,
@@ -117,6 +122,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
     {
         string request;
         CancellationTokenSource turnCancellation;
+        bool drainStateNotifications;
 
         lock (_gate)
         {
@@ -130,14 +136,15 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
                 return;
             }
 
-            _state = VoiceAssistantState.Dispatching;
+            drainStateNotifications = SetStateLocked(VoiceAssistantState.Dispatching);
             _turnCancellation?.Cancel();
             _turnCancellation?.Dispose();
             turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
             _turnCancellation = turnCancellation;
         }
 
-        StateChanged?.Invoke(VoiceAssistantState.Dispatching);
+        if (drainStateNotifications)
+            DrainStateNotifications();
         _ = DispatchAsync(request, turnCancellation.Token);
     }
 
@@ -156,34 +163,58 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
             }
 
             var receipt = await _chat.SendAsync(sessionKey, request, cancellationToken).ConfigureAwait(false);
-            if (receipt.Disposition != VoiceAssistantSendDisposition.Direct)
+            if (receipt.Disposition == VoiceAssistantSendDisposition.Terminated)
             {
-                await _chat.CancelAsync(receipt, cancellationToken).ConfigureAwait(false);
-                await RecoverAsync(VoiceAssistantState.Unavailable).ConfigureAwait(false);
+                await RecoverAsync(VoiceAssistantState.WakeListening).ConfigureAwait(false);
                 return;
             }
 
-            CancellationTokenSource timeoutCancellation;
+            if (receipt.Disposition != VoiceAssistantSendDisposition.Direct)
+            {
+                await _chat.CancelAsync(receipt, cancellationToken).ConfigureAwait(false);
+                await RecoverAsync(
+                    receipt.Disposition == VoiceAssistantSendDisposition.Untrackable
+                        ? VoiceAssistantState.Error
+                        : VoiceAssistantState.Unavailable).ConfigureAwait(false);
+                return;
+            }
+
+            CancellationTokenSource? timeoutCancellation = null;
+            var invalidatedBeforeRegistration = false;
+            var drainStateNotifications = false;
             lock (_gate)
             {
                 if (_disposed || cancellationToken.IsCancellationRequested)
                     return;
 
-                _activeTurn = receipt;
-                _state = VoiceAssistantState.WaitingForReply;
-                _replyTimeoutCancellation?.Cancel();
-                _replyTimeoutCancellation?.Dispose();
-                timeoutCancellation =
-                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                _replyTimeoutCancellation = timeoutCancellation;
+                invalidatedBeforeRegistration = _chat.IsTurnInvalidated(receipt);
+                if (!invalidatedBeforeRegistration)
+                {
+                    _activeTurn = receipt;
+                    drainStateNotifications = SetStateLocked(VoiceAssistantState.WaitingForReply);
+                    _replyTimeoutCancellation?.Cancel();
+                    _replyTimeoutCancellation?.Dispose();
+                    timeoutCancellation =
+                        CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    _replyTimeoutCancellation = timeoutCancellation;
+                }
             }
 
-            StateChanged?.Invoke(VoiceAssistantState.WaitingForReply);
+            if (invalidatedBeforeRegistration)
+            {
+                await RecoverAsync(VoiceAssistantState.WakeListening).ConfigureAwait(false);
+                return;
+            }
+
+            var registeredTimeout = timeoutCancellation
+                ?? throw new InvalidOperationException("Voice Assistant reply timeout was not registered.");
+            if (drainStateNotifications)
+                DrainStateNotifications();
             try
             {
-                await Task.Delay(_replyTimeout, timeoutCancellation.Token).ConfigureAwait(false);
+                await Task.Delay(_replyTimeout, registeredTimeout.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
+            catch (OperationCanceledException) when (registeredTimeout.IsCancellationRequested)
             {
                 return;
             }
@@ -229,6 +260,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
     private async Task RecoverAsync(VoiceAssistantState transientState)
     {
         VoiceAssistantTurnReceipt? receipt;
+        var drainStateNotifications = false;
         lock (_gate)
         {
             receipt = _activeTurn;
@@ -240,11 +272,11 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
             _replyTimeoutCancellation?.Dispose();
             _replyTimeoutCancellation = null;
             if (!_disposed)
-                _state = transientState;
+                drainStateNotifications = SetStateLocked(transientState);
         }
 
-        if (!_disposed)
-            StateChanged?.Invoke(transientState);
+        if (drainStateNotifications)
+            DrainStateNotifications();
 
         if (receipt is not null && transientState != VoiceAssistantState.WakeListening)
         {
@@ -262,22 +294,32 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
 
     private async Task ReconcileCoreAsync()
     {
+        lock (_gate)
+        {
+            if (_disposed)
+                return;
+        }
+
         await _reconcileGate.WaitAsync().ConfigureAwait(false);
         try
         {
             VoiceAssistantConfiguration configuration;
+            VoiceAssistantAvailability availability;
             VoiceAssistantState target;
             VoiceAssistantTurnReceipt? canceledTurn = null;
+            bool drainStateNotifications;
             lock (_gate)
             {
                 if (_disposed)
                     return;
 
                 configuration = _configuration();
+                availability = _chat.GetAvailability();
                 target = !configuration.Enabled
                     ? VoiceAssistantState.Off
                     : !configuration.LocalPrerequisitesReady ||
-                      string.IsNullOrWhiteSpace(_chat.GetReadySessionKey())
+                      !availability.IsUsable ||
+                      !availability.CanSendDirectly
                         ? VoiceAssistantState.Unavailable
                         : VoiceAssistantState.Starting;
 
@@ -285,8 +327,16 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
                     VoiceAssistantState.WaitingForReply or
                     VoiceAssistantState.Speaking)
                 {
-                    if (target == VoiceAssistantState.Starting)
+                    var ownedRunStillCurrent = _activeTurn?.GatewayRunId is { Length: > 0 } ownedRunId &&
+                        (string.IsNullOrWhiteSpace(availability.ActiveRunId) ||
+                         string.Equals(availability.ActiveRunId, ownedRunId, StringComparison.Ordinal));
+                    if (configuration.Enabled &&
+                        configuration.LocalPrerequisitesReady &&
+                        availability.IsUsable &&
+                        (_state == VoiceAssistantState.Dispatching || ownedRunStillCurrent))
+                    {
                         return;
+                    }
 
                     _turnCancellation?.Cancel();
                     _turnCancellation?.Dispose();
@@ -298,10 +348,11 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
                     _activeTurn = null;
                 }
 
-                _state = target;
+                drainStateNotifications = SetStateLocked(target);
             }
 
-            StateChanged?.Invoke(target);
+            if (drainStateNotifications)
+                DrainStateNotifications();
             await _input.StopAsync().ConfigureAwait(false);
             if (canceledTurn is not null)
                 await _chat.CancelAsync(canceledTurn, _lifetime.Token).ConfigureAwait(false);
@@ -312,28 +363,34 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
             try
             {
                 await _input.StartAsync(_lifetime.Token).ConfigureAwait(false);
+                bool drainWakeListening;
                 lock (_gate)
                 {
                     if (_disposed)
                         return;
-                    _state = VoiceAssistantState.WakeListening;
+                    drainWakeListening = SetStateLocked(VoiceAssistantState.WakeListening);
                 }
-                StateChanged?.Invoke(VoiceAssistantState.WakeListening);
+                if (drainWakeListening)
+                    DrainStateNotifications();
             }
             catch (VoiceCaptureBusyException)
             {
+                bool drainUnavailable;
                 lock (_gate)
-                    _state = VoiceAssistantState.Unavailable;
-                StateChanged?.Invoke(VoiceAssistantState.Unavailable);
+                    drainUnavailable = SetStateLocked(VoiceAssistantState.Unavailable);
+                if (drainUnavailable)
+                    DrainStateNotifications();
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
             {
             }
             catch
             {
+                bool drainError;
                 lock (_gate)
-                    _state = VoiceAssistantState.Error;
-                StateChanged?.Invoke(VoiceAssistantState.Error);
+                    drainError = SetStateLocked(VoiceAssistantState.Error);
+                if (drainError)
+                    DrainStateNotifications();
             }
         }
         finally
@@ -345,6 +402,71 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
     private void OnCaptureAvailable() => _ = ReconcileCoreAsync();
 
     private void OnChatReadinessChanged() => _ = ReconcileCoreAsync();
+
+    private void OnTurnInvalidated(VoiceAssistantTurnInvalidation invalidation)
+    {
+        var changed = false;
+        var drainStateNotifications = false;
+        lock (_gate)
+        {
+            if (_disposed ||
+                _activeTurn is not { } activeTurn ||
+                !string.Equals(activeTurn.SessionKey, invalidation.SessionKey, StringComparison.Ordinal) ||
+                !string.Equals(activeTurn.GatewayRunId, invalidation.GatewayRunId, StringComparison.Ordinal) ||
+                !string.Equals(activeTurn.LocalMessageId, invalidation.LocalMessageId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _activeTurn = null;
+            _turnCancellation?.Cancel();
+            _turnCancellation?.Dispose();
+            _turnCancellation = null;
+            _replyTimeoutCancellation?.Cancel();
+            _replyTimeoutCancellation?.Dispose();
+            _replyTimeoutCancellation = null;
+            drainStateNotifications = SetStateLocked(VoiceAssistantState.Unavailable);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            if (drainStateNotifications)
+                DrainStateNotifications();
+            _ = ReconcileCoreAsync();
+        }
+    }
+
+    private bool SetStateLocked(VoiceAssistantState state)
+    {
+        _state = state;
+        _pendingStateNotifications.Enqueue(state);
+        if (_stateNotificationDrainActive)
+            return false;
+
+        _stateNotificationDrainActive = true;
+        return true;
+    }
+
+    private void DrainStateNotifications()
+    {
+        while (true)
+        {
+            VoiceAssistantState state;
+            lock (_gate)
+            {
+                if (_pendingStateNotifications.Count == 0)
+                {
+                    _stateNotificationDrainActive = false;
+                    return;
+                }
+
+                state = _pendingStateNotifications.Dequeue();
+            }
+
+            StateChanged?.Invoke(state);
+        }
+    }
 
     private static string? GetIdentity(OpenClawNotification notification) =>
         !string.IsNullOrWhiteSpace(notification.SessionKey) &&
@@ -402,6 +524,7 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
         _input.UtteranceCompleted -= OnUtteranceCompleted;
         _input.CaptureAvailable -= OnCaptureAvailable;
         _chat.ReadinessChanged -= OnChatReadinessChanged;
+        _chat.TurnInvalidated -= OnTurnInvalidated;
         _lifetime.Cancel();
         await _input.StopAsync().ConfigureAwait(false);
         if (activeTurn is not null)
@@ -409,6 +532,5 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
         _replyTimeoutCancellation?.Dispose();
         _turnCancellation?.Dispose();
         _lifetime.Dispose();
-        _reconcileGate.Dispose();
     }
 }

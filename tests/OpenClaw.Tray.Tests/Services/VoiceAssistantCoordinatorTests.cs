@@ -39,6 +39,71 @@ public sealed class VoiceAssistantCoordinatorTests
     }
 
     [Fact]
+    public async Task TerminatedDisposition_ResumesListeningWithoutCancel()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat { Disposition = VoiceAssistantSendDisposition.Terminated };
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        await coordinator.ReconcileAsync();
+
+        input.Emit("OpenClaw, fast failure");
+        await WaitUntilAsync(() => chat.Requests.Count == 1);
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+
+        Assert.Single(chat.Requests);
+        Assert.Equal(0, chat.Canceled);
+        Assert.Empty(speaker.Spoken);
+    }
+
+    [Fact]
+    public async Task DirectReceiptInvalidatedBeforeRegistration_ResumesListeningWithoutCancel()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat { InvalidateBeforeSendReturns = true };
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        await coordinator.ReconcileAsync();
+
+        input.Emit("OpenClaw, fast invalidation");
+        await WaitUntilAsync(() => chat.Requests.Count == 1);
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+
+        Assert.Equal(0, chat.Canceled);
+        Assert.Empty(speaker.Spoken);
+    }
+
+    [Fact]
+    public async Task ReentrantInvalidation_PublishesWaitingBeforeUnavailable()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat();
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        var notifications = new List<VoiceAssistantState>();
+        var notificationsGate = new object();
+        coordinator.StateChanged += state =>
+        {
+            if (state == VoiceAssistantState.WaitingForReply)
+                chat.InvalidateLastTurn();
+            lock (notificationsGate)
+                notifications.Add(state);
+        };
+        await coordinator.ReconcileAsync();
+
+        input.Emit("OpenClaw, invalidate while publishing");
+        await WaitUntilAsync(() => chat.Requests.Count == 1);
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+
+        VoiceAssistantState[] captured;
+        lock (notificationsGate)
+            captured = notifications.ToArray();
+        Assert.True(
+            Array.IndexOf(captured, VoiceAssistantState.WaitingForReply) <
+            Array.IndexOf(captured, VoiceAssistantState.Unavailable));
+    }
+
+    [Fact]
     public async Task MatchingFinal_IsClaimedAndDuplicateIsSuppressedWithoutReplay()
     {
         var input = new FakeInput();
@@ -231,6 +296,43 @@ public sealed class VoiceAssistantCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnRunBusyTransition_DoesNotCancelWaitingTurn()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat();
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        await coordinator.ReconcileAsync();
+        input.Emit("OpenClaw, keep waiting");
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WaitingForReply);
+
+        chat.CanSendDirectly = false;
+        chat.ActiveRunId = chat.LastReceipt!.GatewayRunId;
+        chat.NotifyAvailabilityChanged();
+        await Task.Delay(30);
+
+        Assert.Equal(VoiceAssistantState.WaitingForReply, coordinator.State);
+        Assert.Equal(0, chat.Canceled);
+    }
+
+    [Fact]
+    public async Task ExactTurnInvalidation_RecoversWithoutSecondCancel()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat();
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        await coordinator.ReconcileAsync();
+        input.Emit("OpenClaw, stop this turn");
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WaitingForReply);
+
+        chat.InvalidateLastTurn();
+        await WaitUntilAsync(() => coordinator.State == VoiceAssistantState.WakeListening);
+
+        Assert.Equal(0, chat.Canceled);
+    }
+
+    [Fact]
     public async Task StartupReadinessArrival_StartsWakeListeningWithoutSettingsToggle()
     {
         var input = new FakeInput();
@@ -305,22 +407,36 @@ public sealed class VoiceAssistantCoordinatorTests
     private sealed class FakeChat : IVoiceAssistantChatTurnClient
     {
         private VoiceAssistantTurnReceipt? _lastReceipt;
+        private readonly HashSet<string> _invalidated = new(StringComparer.Ordinal);
 
         public VoiceAssistantSendDisposition Disposition { get; set; } = VoiceAssistantSendDisposition.Direct;
+        public bool InvalidateBeforeSendReturns { get; set; }
         public bool AllowMissingMetadataFallback { get; set; }
         public string? ReadySessionKey { get; set; } = "main";
+        public bool CanSendDirectly { get; set; } = true;
+        public string? ActiveRunId { get; set; }
         public List<string> Requests { get; } = new();
         public int Canceled { get; private set; }
+        public VoiceAssistantTurnReceipt? LastReceipt => _lastReceipt;
 
         public event Action? ReadinessChanged;
+        public event Action<VoiceAssistantTurnInvalidation>? TurnInvalidated;
 
         public string? GetReadySessionKey() => ReadySessionKey;
+        public VoiceAssistantAvailability GetAvailability() =>
+            new(
+                IsUsable: ReadySessionKey is not null,
+                SessionKey: ReadySessionKey,
+                CanSendDirectly: ReadySessionKey is not null && CanSendDirectly,
+                ActiveRunId: ActiveRunId);
 
         public void SetReadySessionKey(string? sessionKey)
         {
             ReadySessionKey = sessionKey;
             ReadinessChanged?.Invoke();
         }
+
+        public void NotifyAvailabilityChanged() => ReadinessChanged?.Invoke();
 
         public Task<VoiceAssistantTurnReceipt> SendAsync(
             string sessionKey,
@@ -334,6 +450,14 @@ public sealed class VoiceAssistantCoordinatorTests
                 $"message-{Requests.Count}",
                 $"run-{Requests.Count}",
                 PreSendSequence: 10);
+            if (InvalidateBeforeSendReturns)
+            {
+                _invalidated.Add(_lastReceipt.LocalMessageId);
+                TurnInvalidated?.Invoke(new VoiceAssistantTurnInvalidation(
+                    _lastReceipt.SessionKey,
+                    _lastReceipt.GatewayRunId!,
+                    _lastReceipt.LocalMessageId));
+            }
             return Task.FromResult(_lastReceipt);
         }
 
@@ -345,10 +469,13 @@ public sealed class VoiceAssistantCoordinatorTests
             return Task.CompletedTask;
         }
 
+        public bool IsTurnInvalidated(VoiceAssistantTurnReceipt receipt) =>
+            _invalidated.Contains(receipt.LocalMessageId);
+
         public bool IsResponseForTurn(
             VoiceAssistantTurnReceipt receipt,
             OpenClawNotification notification) =>
-            notification.OpenClawId == $"reply-{receipt.SendRunId}" ||
+            notification.OpenClawId == $"reply-{receipt.GatewayRunId}" ||
             AllowMissingMetadataFallback &&
                 notification.OpenClawId is null &&
                 notification.OpenClawSeq is null;
@@ -358,11 +485,21 @@ public sealed class VoiceAssistantCoordinatorTests
             {
                 IsChat = true,
                 SessionKey = _lastReceipt!.SessionKey,
-                OpenClawId = $"reply-{_lastReceipt.SendRunId}",
+                OpenClawId = $"reply-{_lastReceipt.GatewayRunId}",
                 OpenClawSeq = 11,
                 Message = message,
                 FullMessage = message
             };
+
+        public void InvalidateLastTurn()
+        {
+            var receipt = _lastReceipt!;
+            _invalidated.Add(receipt.LocalMessageId);
+            TurnInvalidated?.Invoke(new VoiceAssistantTurnInvalidation(
+                receipt.SessionKey,
+                receipt.GatewayRunId!,
+                receipt.LocalMessageId));
+        }
     }
 
     private sealed class FakeSpeaker : IVoiceAssistantSpeaker
