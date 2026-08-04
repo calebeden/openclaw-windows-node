@@ -210,6 +210,32 @@ public sealed class VoiceAssistantCoordinator : IAsyncDisposable
                 ?? throw new InvalidOperationException("Voice Assistant reply timeout was not registered.");
             if (drainStateNotifications)
                 DrainStateNotifications();
+
+            if (_chat.TryTakeBufferedResponse(receipt, out var bufferedResponse))
+            {
+                var speakBufferedResponse = false;
+                var drainSpeaking = false;
+                CancellationToken bufferedTurnCancellation;
+                lock (_gate)
+                {
+                    bufferedTurnCancellation = _turnCancellation?.Token ?? _lifetime.Token;
+                    speakBufferedResponse = ReferenceEquals(_activeTurn, receipt) &&
+                        _state == VoiceAssistantState.WaitingForReply &&
+                        !bufferedTurnCancellation.IsCancellationRequested;
+                    if (speakBufferedResponse)
+                    {
+                        drainSpeaking = SetStateLocked(VoiceAssistantState.Speaking);
+                        registeredTimeout.Cancel();
+                    }
+                }
+
+                if (drainSpeaking)
+                    DrainStateNotifications();
+                if (speakBufferedResponse)
+                    _ = SpeakAndResumeAsync(bufferedResponse, receipt, bufferedTurnCancellation);
+                return;
+            }
+
             try
             {
                 await Task.Delay(_replyTimeout, registeredTimeout.Token).ConfigureAwait(false);

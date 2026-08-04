@@ -45,6 +45,8 @@ public interface IVoiceAssistantChatTurnClient
 
     bool IsTurnInvalidated(VoiceAssistantTurnReceipt receipt);
 
+    bool TryTakeBufferedResponse(VoiceAssistantTurnReceipt receipt, out string responseText);
+
     bool IsResponseForTurn(VoiceAssistantTurnReceipt receipt, OpenClawNotification notification);
 }
 

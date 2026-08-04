@@ -218,6 +218,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     {
         public string LocalMessageId { get; } = localMessageId;
         public string? GatewayRunId { get; set; }
+        public string? ProvisionalRunId { get; set; }
+        public string? TerminalRunId { get; set; }
         public VoiceAssistantResponseIdentity? PendingResponse { get; set; }
     }
     private enum AssistantQueueFrameDisposition
@@ -612,6 +614,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             : sendResult.RunId;
         VoiceAssistantResponseIdentity? pendingResponse = null;
         var terminatedBeforeBinding = false;
+        VoiceAssistantTurnInvalidation? terminalInvalidation = null;
         if (sendDirectly)
         {
             lock (_gate)
@@ -632,14 +635,26 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     }
                     else if (IsTerminalRunIdLocked(threadId, gatewayRunId))
                     {
-                        terminatedBeforeBinding = true;
-                        _voiceAssistantTurns.Remove(threadId);
+                        if (string.Equals(tracked.TerminalRunId, gatewayRunId, StringComparison.Ordinal))
+                        {
+                            terminalInvalidation = new VoiceAssistantTurnInvalidation(
+                                tracked.LocalMessageId,
+                                threadId,
+                                gatewayRunId);
+                        }
+                        else
+                        {
+                            terminatedBeforeBinding = true;
+                            _voiceAssistantTurns.Remove(threadId);
+                        }
                     }
                 }
             }
         }
         if (pendingResponse is not null)
             VoiceAssistantResponseObserved?.Invoke(pendingResponse);
+        else if (terminalInvalidation is not null)
+            _ = InvalidateVoiceAssistantTurnAfterTerminalGraceAsync(terminalInvalidation);
 
         return new VoiceAssistantTurnReceipt(
             !sendDirectly
@@ -2974,8 +2989,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             {
                 _activeRunIds.Remove(threadId, out var completedRunId);
                 _voiceAssistantTurns.TryGetValue(threadId, out var tracked);
+                var trackedRunId = tracked?.GatewayRunId ?? tracked?.TerminalRunId;
                 if (string.IsNullOrWhiteSpace(completedRunId) &&
-                    tracked?.GatewayRunId is { Length: > 0 } terminalRunId &&
+                    trackedRunId is { Length: > 0 } terminalRunId &&
                     IsTerminalRunIdLocked(threadId, terminalRunId))
                 {
                     completedRunId = terminalRunId;
@@ -3117,13 +3133,20 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         {
             lock (_gate)
             {
-                if (_voiceAssistantTurns.TryGetValue(threadId, out var tracked) &&
-                    string.Equals(tracked.GatewayRunId, evt.RunId, StringComparison.Ordinal))
+                if (_voiceAssistantTurns.TryGetValue(threadId, out var tracked))
                 {
-                    terminalVoiceAssistantTurn = new VoiceAssistantTurnInvalidation(
-                        tracked.LocalMessageId,
-                        threadId,
-                        evt.RunId);
+                    if (tracked.GatewayRunId is null &&
+                        string.Equals(tracked.ProvisionalRunId, evt.RunId, StringComparison.Ordinal))
+                    {
+                        tracked.TerminalRunId = evt.RunId;
+                    }
+                    else if (string.Equals(tracked.GatewayRunId, evt.RunId, StringComparison.Ordinal))
+                    {
+                        terminalVoiceAssistantTurn = new VoiceAssistantTurnInvalidation(
+                            tracked.LocalMessageId,
+                            threadId,
+                            evt.RunId);
+                    }
                 }
             }
         }
@@ -3358,6 +3381,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                             !_pendingAbortCounts.ContainsKey(threadId));
                     if (!string.IsNullOrEmpty(evt.RunId))
                     {
+                        if (_voiceAssistantTurns.TryGetValue(threadId, out var trackedVoiceTurn) &&
+                            trackedVoiceTurn.GatewayRunId is null)
+                        {
+                            trackedVoiceTurn.ProvisionalRunId = evt.RunId;
+                        }
+
                         if (_voiceAssistantSuppressedRunIds.TryGetValue(threadId, out var suppressedRunId) &&
                             !string.Equals(suppressedRunId, evt.RunId, StringComparison.Ordinal))
                         {
@@ -3522,6 +3551,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         if (_voiceAssistantTurns.TryGetValue(threadId, out var tracked) &&
             tracked.GatewayRunId is null)
         {
+            if (string.Equals(tracked.ProvisionalRunId, runId, StringComparison.Ordinal))
+                tracked.TerminalRunId = runId;
             RememberTerminalRunIdLocked(threadId, runId);
         }
     }

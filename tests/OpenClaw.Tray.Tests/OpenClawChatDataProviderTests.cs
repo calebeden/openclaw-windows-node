@@ -461,7 +461,7 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
-    public async Task VoiceAssistant_TerminalBeforeSendResult_ReturnsTerminatedDisposition()
+    public async Task VoiceAssistant_TerminalWithoutProvisionalStart_ReturnsTerminated()
     {
         var bridge = new FakeBridge
         {
@@ -492,8 +492,102 @@ public class OpenClawChatDataProviderTests
         var receipt = await sendTask;
 
         Assert.Equal(VoiceAssistantSendDisposition.Terminated, receipt.Disposition);
-        await adapter.CancelAsync(receipt, CancellationToken.None);
         Assert.Empty(bridge.AbortedRunIds);
+    }
+
+    [Fact]
+    public async Task VoiceAssistant_TerminalAndFinalBeforeSendResult_BuffersAcceptedResponse()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        var sendResult = new TaskCompletionSource<ChatSendResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        bridge.SendBehavior = (_, _, _) => sendResult.Task;
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+
+        var sendTask = adapter.SendAsync("main", "voice request", CancellationToken.None);
+        for (var attempt = 0; attempt < 100 && bridge.SentMessages.Count == 0; attempt++)
+            await Task.Delay(10);
+        Assert.Single(bridge.SentMessages);
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"start"}""",
+            runId: "voice-run"));
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"end"}""",
+            runId: "voice-run"));
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            State = "final",
+            Text = "fast response"
+        });
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        sendResult.SetResult(new ChatSendResult { RunId = "voice-run", Status = "started" });
+
+        var receipt = await sendTask;
+
+        Assert.Equal(VoiceAssistantSendDisposition.Direct, receipt.Disposition);
+        Assert.True(adapter.TryTakeBufferedResponse(receipt, out var responseText));
+        Assert.Equal("fast response", responseText);
+        await Task.Delay(300);
+        Assert.False(adapter.IsTurnInvalidated(receipt));
+    }
+
+    [Fact]
+    public async Task VoiceAssistant_UnrelatedTerminalAndFinalBeforeSendResult_AreNotBuffered()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        var sendResult = new TaskCompletionSource<ChatSendResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        bridge.SendBehavior = (_, _, _) => sendResult.Task;
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+
+        var sendTask = adapter.SendAsync("main", "voice request", CancellationToken.None);
+        for (var attempt = 0; attempt < 100 && bridge.SentMessages.Count == 0; attempt++)
+            await Task.Delay(10);
+        Assert.Single(bridge.SentMessages);
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"start"}""",
+            runId: "other-run"));
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"end"}""",
+            runId: "other-run"));
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            State = "final",
+            Text = "unrelated response"
+        });
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        sendResult.SetResult(new ChatSendResult { RunId = "voice-run", Status = "started" });
+
+        var receipt = await sendTask;
+
+        Assert.Equal(VoiceAssistantSendDisposition.Direct, receipt.Disposition);
+        Assert.False(adapter.TryTakeBufferedResponse(receipt, out _));
     }
 
     [Fact]

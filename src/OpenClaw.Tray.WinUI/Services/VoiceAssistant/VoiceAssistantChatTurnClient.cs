@@ -52,6 +52,37 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
             return _canceled.Contains(receipt.LocalMessageId);
     }
 
+    public bool TryTakeBufferedResponse(
+        VoiceAssistantTurnReceipt receipt,
+        out string responseText)
+    {
+        responseText = string.Empty;
+        if (!_responses.TryGetValue(receipt.LocalMessageId, out var response) ||
+            !string.Equals(response.SessionKey, receipt.SessionKey, StringComparison.Ordinal) ||
+            !string.Equals(response.GatewayRunId, receipt.GatewayRunId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (response.GatewaySequence is { } sequence &&
+            receipt.PreSendSequence is { } baseline &&
+            sequence <= baseline)
+        {
+            _responses.TryRemove(
+                new KeyValuePair<string, ResponseIdentity>(receipt.LocalMessageId, response));
+            return false;
+        }
+
+        if (!_responses.TryRemove(
+            new KeyValuePair<string, ResponseIdentity>(receipt.LocalMessageId, response)))
+        {
+            return false;
+        }
+
+        responseText = response.ResponseText;
+        return true;
+    }
+
     public bool IsResponseForTurn(
         VoiceAssistantTurnReceipt receipt,
         OpenClawNotification notification)

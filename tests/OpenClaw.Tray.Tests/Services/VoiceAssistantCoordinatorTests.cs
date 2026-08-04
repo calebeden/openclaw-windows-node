@@ -74,6 +74,23 @@ public sealed class VoiceAssistantCoordinatorTests
     }
 
     [Fact]
+    public async Task BufferedResponseBeforeReceiptRegistration_IsSpoken()
+    {
+        var input = new FakeInput();
+        var chat = new FakeChat { BufferedResponse = "fast response" };
+        var speaker = new FakeSpeaker();
+        await using var coordinator = Create(input, chat, speaker);
+        await coordinator.ReconcileAsync();
+
+        input.Emit("OpenClaw, answer quickly");
+        await WaitUntilAsync(() =>
+            speaker.Spoken.Count == 1 &&
+            coordinator.State == VoiceAssistantState.WakeListening);
+
+        Assert.Equal(["fast response"], speaker.Spoken);
+    }
+
+    [Fact]
     public async Task ReentrantInvalidation_PublishesWaitingBeforeUnavailable()
     {
         var input = new FakeInput();
@@ -412,6 +429,7 @@ public sealed class VoiceAssistantCoordinatorTests
         public VoiceAssistantSendDisposition Disposition { get; set; } = VoiceAssistantSendDisposition.Direct;
         public bool InvalidateBeforeSendReturns { get; set; }
         public bool AllowMissingMetadataFallback { get; set; }
+        public string? BufferedResponse { get; set; }
         public string? ReadySessionKey { get; set; } = "main";
         public bool CanSendDirectly { get; set; } = true;
         public string? ActiveRunId { get; set; }
@@ -471,6 +489,15 @@ public sealed class VoiceAssistantCoordinatorTests
 
         public bool IsTurnInvalidated(VoiceAssistantTurnReceipt receipt) =>
             _invalidated.Contains(receipt.LocalMessageId);
+
+        public bool TryTakeBufferedResponse(
+            VoiceAssistantTurnReceipt receipt,
+            out string responseText)
+        {
+            responseText = BufferedResponse ?? string.Empty;
+            BufferedResponse = null;
+            return responseText.Length > 0;
+        }
 
         public bool IsResponseForTurn(
             VoiceAssistantTurnReceipt receipt,
