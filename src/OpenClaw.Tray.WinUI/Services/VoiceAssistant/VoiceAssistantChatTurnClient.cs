@@ -122,14 +122,24 @@ public sealed class VoiceAssistantChatTurnClient : IVoiceAssistantChatTurnClient
         var availability = _provider.GetVoiceAssistantAvailability();
         lock (_readinessGate)
         {
-            if (_lastAvailability == availability)
+            if (HasSameReadiness(_lastAvailability, availability))
+            {
+                _lastAvailability = availability;
                 return;
+            }
 
             _lastAvailability = availability;
         }
 
         ReadinessChanged?.Invoke();
     }
+
+    private static bool HasSameReadiness(
+        VoiceAssistantAvailability left,
+        VoiceAssistantAvailability right) =>
+        left.IsUsable == right.IsUsable &&
+        left.CanSendDirectly == right.CanSendDirectly &&
+        string.Equals(left.ActiveRunId, right.ActiveRunId, StringComparison.Ordinal);
 
     private void RememberCanceled(string localMessageId)
     {

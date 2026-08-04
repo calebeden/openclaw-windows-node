@@ -297,6 +297,44 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task VoiceAssistant_UsesSelectedChatSession()
+    {
+        using var temp = new TempDirectory();
+        var review = new SessionInfo
+        {
+            Key = "review",
+            DisplayName = "Review session",
+            Status = "active"
+        };
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession(), review]
+        };
+        await using var provider = new OpenClawChatDataProvider(
+            bridge,
+            post: null,
+            toolMetaCacheFilePath: Path.Combine(temp.DirectoryPath, "tool-metadata.json"),
+            lastChatStateFilePath: Path.Combine(temp.DirectoryPath, "last-chat-state.json"));
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+        var readinessChanges = 0;
+        adapter.ReadinessChanged += () => readinessChanges++;
+
+        provider.RememberSelectedThread("review");
+
+        Assert.Equal("review", adapter.GetReadySessionKey());
+        Assert.Equal(0, readinessChanges);
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        var receipt = await adapter.SendAsync("review", "voice request", CancellationToken.None);
+        Assert.Equal("review", receipt.SessionKey);
+        Assert.Equal(["review"], bridge.SentSessionKeys);
+    }
+
+    [Fact]
     public async Task VoiceAssistant_FinalWithoutGatewayMetadata_CorrelatesByTrackedText()
     {
         var bridge = new FakeBridge
@@ -568,8 +606,57 @@ public class OpenClawChatDataProviderTests
             """{"phase":"end"}""",
             runId: "voice-run"));
 
+        await Task.Delay(300);
+
         Assert.Equal(receipt.LocalMessageId, invalidation?.LocalMessageId);
         Assert.Equal("voice-run", invalidation?.GatewayRunId);
+    }
+
+    [Fact]
+    public async Task VoiceAssistant_FinalAfterLifecycleEnd_CorrelatesBeforeTerminalInvalidation()
+    {
+        var bridge = new FakeBridge
+        {
+            IsConnected = true,
+            CurrentStatus = ConnectionStatus.Connected,
+            HasHandshakeSnapshot = true,
+            MainSessionKey = "main",
+            Sessions = [MainSession()]
+        };
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "voice-run", Status = "started" });
+        await using var provider = new OpenClawChatDataProvider(bridge);
+        using var adapter = new VoiceAssistantChatTurnClient(provider);
+        bridge.RaiseSessions(bridge.Sessions);
+        var invalidated = false;
+        adapter.TurnInvalidated += _ => invalidated = true;
+
+        var receipt = await adapter.SendAsync("main", "voice request", CancellationToken.None);
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"start"}""",
+            runId: "voice-run"));
+        bridge.RaiseAgent(MakeAgentEvent(
+            "lifecycle",
+            """{"phase":"end"}""",
+            runId: "voice-run"));
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            State = "final",
+            Text = "trailing response"
+        });
+        var notification = new OpenClawNotification
+        {
+            IsChat = true,
+            SessionKey = "main",
+            Message = "trailing response",
+            FullMessage = "trailing response"
+        };
+
+        Assert.True(adapter.IsResponseForTurn(receipt, notification));
+        await Task.Delay(300);
+        Assert.False(invalidated);
     }
 
     [Fact]

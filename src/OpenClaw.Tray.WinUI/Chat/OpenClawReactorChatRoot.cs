@@ -549,8 +549,17 @@ public sealed class OpenClawReactorChatRoot : Component<OpenClawReactorChatRootP
         {
             var snapshot = await provider.LoadAsync();
             setSnapshot(snapshot);
-            if (getSelected() is null && snapshot.DefaultThreadId is { } defaultThreadId)
+            var selectedThreadId = getSelected();
+            if (selectedThreadId is null && snapshot.DefaultThreadId is { } defaultThreadId)
+            {
+                selectedThreadId = defaultThreadId;
                 setSelected(defaultThreadId);
+            }
+            if (selectedThreadId is not null &&
+                provider is OpenClawChatDataProvider nativeProvider)
+            {
+                nativeProvider.RememberSelectedThread(selectedThreadId);
+            }
         }
         catch (Exception ex)
         {

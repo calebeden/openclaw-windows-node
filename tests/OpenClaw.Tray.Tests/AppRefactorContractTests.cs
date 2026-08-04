@@ -425,6 +425,34 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
+    public void NativeChatRoots_PropagateInitialSelectionToProvider()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var functionalSource = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Chat",
+            "OpenClawChatRoot.cs"));
+        var reactorSource = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Chat",
+            "OpenClawReactorChatRoot.cs"));
+
+        Assert.Contains(
+            "nativeProvider.RememberSelectedThread(selectedThreadId);",
+            ExtractMethod(functionalSource, "LoadAsync"));
+        Assert.Contains(
+            "nativeProvider.RememberSelectedThread(selectedThreadId);",
+            ExtractMethod(reactorSource, "LoadAsync"));
+        Assert.Contains(
+            "nativeProvider.RememberSelectedThread(threadId);",
+            functionalSource);
+    }
+
+    [Fact]
     public void PermissionsPage_ExecApprovals_UsesAppOwnedStoreWithCas()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
