@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -148,6 +149,37 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
             .GetProperty("agents").GetProperty("main").GetProperty("allowlist");
         Assert.Contains(allowlist.EnumerateArray(),
             rule => rule.GetProperty("pattern").GetString() == TrayAppFixture.SeededExecApprovalPattern);
+    }
+
+    // The GET snapshot deliberately carries no baseHash: upstream's
+    // ExecApprovalsNodeSnapshotSchema is additionalProperties:false and its file-backed
+    // oneOf branch explicitly forbids baseHash, so a snapshot containing one fails
+    // gateway-side validation. baseHash is a .set request parameter only. This proves the
+    // full CAS loop over a real MCP HTTP server: read `hash`, send it back as `baseHash`.
+    [IntegrationFact]
+    public async Task SystemExecApprovals_SetRejectsStaleBaseHash()
+    {
+        using var beforeDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
+        Assert.False(beforeDoc.RootElement.TryGetProperty("baseHash", out _));
+        var currentHash = beforeDoc.RootElement.GetProperty("hash").GetString()!;
+        var beforeFile = beforeDoc.RootElement.GetProperty("file").Clone();
+
+        // A hash that is well-formed but does not describe the on-disk file, i.e. what a
+        // client holding a snapshot from before a concurrent write would send.
+        var staleHash = currentHash.StartsWith("sha256:", StringComparison.Ordinal)
+            ? "sha256:" + new string('0', currentHash.Length - "sha256:".Length)
+            : new string('0', currentHash.Length);
+        Assert.NotEqual(currentHash, staleHash);
+
+        var (isError, text) = await _fixture.Client.CallToolAcceptingFailureAsync(
+            "system.execApprovals.set",
+            new { baseHash = staleHash, file = beforeFile });
+
+        Assert.True(isError, $"Expected stale baseHash to be rejected; response: {text}");
+
+        // The rejected write must not have been applied.
+        using var afterDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
+        Assert.Equal(currentHash, afterDoc.RootElement.GetProperty("hash").GetString());
     }
 
     [IntegrationFact]

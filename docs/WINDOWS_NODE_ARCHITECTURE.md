@@ -538,39 +538,71 @@ When nothing binds, the prompt still shows the operator a resolved executable
 path, falling back to the carrier's own resolution. An approval dialog must never
 ask for a decision with no resolved path displayed.
 
-The executable-level store cannot constrain future arguments. Windows
-interpreters and argument-selected code hosts (for example `mshta.exe`,
-`regsvr32.exe`, `rundll32.exe`, `msbuild.exe`, `installutil.exe`, `certutil.exe`,
-and `wmic.exe`) are therefore maintained in
-`ExecCommandToken.IsIndirectCommandHost` and stay one-time. This catalog is
-intentionally an explicit security maintenance surface: new Windows code-host
-binaries and newly supported runtimes must be classified there before they can
-receive durable approval.
+Durable identity is the executable **plus an argument pattern**, matching macOS and
+the shared protocol. A generated rule persists `path`, `argPattern`, `commandText`,
+and `source`, so approving `where.exe hostname.exe` authorizes exactly that
+argument form and nothing else. This is what makes an explicit code-host catalog
+unnecessary: an argument-selected host such as `mshta.exe` or `rundll32.exe` cannot
+be blanket-approved, because the persisted rule is pinned to the arguments the
+operator actually saw.
 
-This is **not** the macOS binding model, and the difference is deliberate but
-temporary. macOS persists an `argPattern` alongside the executable, so a wrapper
-or interpreter can receive durable approval bound to a specific argument form
-rather than being refused outright. The Windows V2 store has no argument
-constraint, so the catalog is what stands in for that binding. Two consequences
-follow, and both are accepted limitations rather than oversights:
+`argPattern` is written in the platform form the gateway expects. On Windows each
+argument is separator-normalized and the pattern is the anchored, NUL-joined
+regular expression `^escaped(join("\0"))\0$`; zero arguments serialize as `^\0\0$`.
+The matcher selects its separator by testing whether the pattern contains a NUL,
+so both the Windows and the hashed non-Windows form remain readable. Matching runs
+against the full argv including argv[0].
 
-- The catalog is matched by basename, so a renamed copy of a code host is not
-  recognized. Treat it as defense in depth against accidental over-approval, not
-  as a control that withstands a deliberately renamed binary.
-- The catalog can never be provably complete. Adding an `argPattern` to the
-  Windows allowlist entry schema would remove the dependency on it entirely and
-  reach macOS parity, but requires a policy schema and Allow always UX change.
+Authorization consequences follow upstream `matchAllowlist` exactly:
 
-##### Behavior changes from executable-path-only binding
+- A **generated** entry with no `argPattern` never matches. It is skipped rather
+  than widened to a path-only grant, so a truncated or hand-edited rule fails
+  closed.
+- A **path-only** entry authorizes its executable regardless of arguments. That is
+  the operator writing a deliberately broad rule by hand, and it is honored as
+  written. Path-only matches are deferred so a precisely bound rule always wins.
+- Normalization preserves `Source` and `ArgPattern` on rewrite. Dropping either
+  would silently convert a narrow generated rule into a broad path-only one.
 
-- A stored rule naming an interpreter or code host (for example
-  `**/wsl.exe`) previously produced a hard
-  `persistent-approval-not-permitted-for-command-host` refusal. It now produces a
-  normal allowlist miss, so under `ask: "on-miss"` the operator is prompted and
-  may Allow once. This is a deliberate loosening: the previous behavior denied
-  even attended one-time approval.
+##### Trusted carrier: approval identity is separate from execution transport
+
+When the payload inside a strictly trusted canonical `cmd` carrier binds, the node
+authorizes the **inner** executable and argument pattern, but still executes the
+**original validated carrier**. The carrier is not incidental: under MXC it
+transports the PATH and TEMP bootstrap in band, because MXC 0.7 rejects a
+non-empty `process.env`. Substituting the bound direct argv would authorize
+correctly and then run in an environment the command was never prepared for.
+
+Two invariants keep that split safe:
+
+- Only argv[0] may differ from the validated request, and only by being pinned to
+  the resolved `System32` or `SysWOW64` `cmd.exe`. A relative `cmd.exe` would let
+  Windows re-resolve the image against PATH and the working directory at spawn
+  time, which is the hijack the resolved-path rule exists to prevent.
+- Everything from argv[1] onward must be ordinal-identical to the request, so the
+  executed carrier reconstructs the approved `rawCommand` exactly and no
+  metacharacter can be introduced after approval.
+
+Trust is deliberately narrow. A carrier is trusted only when argv[0] is the bare
+name `cmd`/`cmd.exe` or a fully qualified path under `System32`/`SysWOW64`. A
+renamed or relocated image named `cmd.exe` is refused for durable binding and
+falls back to one-time or prompt handling, so an attacker-supplied binary cannot
+be looked through. Non-canonical carriers stay one-time and report an explicit
+diagnostic (`carrier-payload-not-static`) rather than silently failing to bind.
+
+##### Behavior changes from the previous executable-path-only binding
+
+- A stored rule naming an interpreter or code host (for example `**/wsl.exe`)
+  previously produced a hard `persistent-approval-not-permitted-for-command-host`
+  refusal. A hand-written path-only rule now authorizes that executable, matching
+  upstream. This is a deliberate loosening: it is the operator explicitly choosing
+  a broad grant. Generated rules still pin arguments, so this cannot happen by
+  accident through the Allow always UX.
 - A separator-bearing path to a nonexistent file is now rejected at bind time.
   Binding requires the resolved executable to exist.
+- UNC and other network paths are refused for durable approval. Their contents are
+  remotely mutable at a stable path, so a persisted rule would be a standing grant
+  over content the node does not control.
 - Integrity binding is by resolved path only, with no content hash, inode, or
   signature check. This matches macOS `lastResolvedPath` behavior, and leaves the
   same time-of-check to time-of-use exposure between approval and launch.
