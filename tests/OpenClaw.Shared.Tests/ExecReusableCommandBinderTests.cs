@@ -222,11 +222,11 @@ public class ExecReusableCommandBinderTests
     }
 
     // ── Multi-element carrier tails ───────────────────────────────────────────
-    // Upstream approval fixtures send the command text already tokenized across
-    // several argv elements, for example
-    // ["cmd.exe","/d","/s","/c","echo","SAFE&&whoami"]. A binder that only accepts
-    // a single pre-joined tail element silently refuses those, which is exactly the
-    // allowlist failure this work is meant to fix.
+    // Low-level callers and upstream approval fixtures may send command text
+    // already tokenized across several argv elements, for example
+    // ["cmd.exe","/d","/s","/c","echo","SAFE&&whoami"]. Supporting reconstructible
+    // tails preserves compatibility for those callers without changing the live
+    // gateway's single-element command shape.
 
     [Fact]
     public void MultiElementCarrierTail_Binds()
@@ -346,8 +346,38 @@ public class ExecReusableCommandBinderTests
     [Fact]
     public void SystemDirectoryCmd_IsTrustedCarrier()
     {
-        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")));
+        var cmdPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(cmdPath));
+        Assert.True(CanonicalCmdCarrier.IsTrustedSystemCmdPath(cmdPath));
+    }
+
+    [Fact]
+    public void BareCmdResolvingOutsideSystemDirectory_DoesNotBind()
+    {
+        var directory = Directory.CreateTempSubdirectory("openclaw-untrusted-bare-cmd");
+        try
+        {
+            var rogueCmd = Path.Combine(directory.FullName, "cmd.exe");
+            File.Copy(FindTestHostExecutable(), rogueCmd);
+            var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PATH"] = directory.FullName,
+                ["PATHEXT"] = ".EXE",
+            };
+
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd: null,
+                env);
+
+            Assert.Null(bound);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     [Fact]
@@ -387,7 +417,6 @@ public class ExecReusableCommandBinderTests
     [InlineData(".vbs")]
     [InlineData(".wsf")]
     [InlineData(".msc")]
-    [InlineData(".com")]
     [InlineData(".bat")]
     [InlineData(".cmd")]
     public void NonExecutableExtensionTarget_DoesNotBind(string extension)
@@ -427,6 +456,20 @@ public class ExecReusableCommandBinderTests
         {
             directory.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public void NativeComExtensionTarget_Binds()
+    {
+        var target = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "chcp.com");
+        Assert.True(File.Exists(target), $"Native Windows .com target was not found: {target}");
+
+        var bound = ExecReusableCommandBinder.TryBind([target], cwd: null, env: null);
+
+        Assert.NotNull(bound);
+        Assert.Equal(target, bound!.Argv[0], ignoreCase: true);
     }
 
     // ── Expanded indirect code-host catalog ───────────────────────────────────

@@ -28,6 +28,9 @@ internal static class ExecReusableCommandBinder
 
         if (CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(command, out var payload))
         {
+            var carrierResolution = ExecCommandResolver.Resolve(command, cwd, env);
+            if (!CanonicalCmdCarrier.IsTrustedSystemCmdPath(carrierResolution?.ResolvedPath))
+                return null;
             if (!TryTokenizeStaticCmdPayload(payload, out var payloadArgv))
                 return null;
             if (payloadArgv.Count == 0
@@ -137,17 +140,18 @@ internal static class ExecReusableCommandBinder
     private static bool IsCmdWhitespace(char ch) => ch is ' ' or '\t';
 
     /// <summary>
-    /// Durable binding is restricted to real PE executables.
+    /// Durable binding is restricted to Windows loader-executable targets.
     ///
     /// PATH resolution probes every PATHEXT entry, which by default also includes
-    /// .COM, .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all
-    /// interpreted content whose meaning can change without any change to the path
-    /// that was approved, so an allowlist of extensions is used here rather than a
-    /// denylist of the two batch extensions.
+    /// .COM, .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Native .com utilities
+    /// are directly executable by CreateProcess, while the script and document
+    /// extensions delegate meaning to an interpreter. Use an allowlist here rather
+    /// than a denylist of only the two batch extensions.
     /// </summary>
     internal static bool IsBindableExecutable(string path)
     {
         var extension = Path.GetExtension(path);
-        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase);
+        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".com", StringComparison.OrdinalIgnoreCase);
     }
 }

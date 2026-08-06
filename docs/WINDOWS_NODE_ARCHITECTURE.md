@@ -502,9 +502,11 @@ keeps approval identity and process execution on one argv representation.
 #### Decision: bind reusable gateway commands to direct argv
 
 The gateway represents Windows shell text as
-`["cmd.exe", "/d", "/s", "/c", "<command>"]`. The command tail may arrive as a
-single pre-joined element or already tokenized across several argv elements, and
-the carrier executable may be either the bare name or a fully qualified path.
+`["cmd.exe", "/d", "/s", "/c", "<command>"]` with one pre-joined command
+element. Low-level callers and upstream approval fixtures may instead supply a
+reconstructible tokenized tail. The carrier executable may be the bare name or
+the fully qualified system `cmd.exe` path; arbitrary files named `cmd.exe` are
+not transparent durable-approval carriers.
 `CanonicalCmdCarrier` is the single owner of that recognition, shared by the
 approvals binder and the MXC command-line builder so the layer that authorizes a
 shape and the layer that runs it cannot disagree. A multi-element tail is only
@@ -517,10 +519,10 @@ command. The binder accepts an intentionally small grammar: unquoted literal
 tokens separated by whitespace. It rejects quoting, pipelines, command chains,
 redirection, expansion, caret escapes, grouping, CMD built-ins, unresolved or
 nonexistent executables, and interpreter/command-host targets. Durable binding is
-further restricted to `.exe` targets: PATH resolution probes every `PATHEXT`
-entry, so a bare name can otherwise resolve to `.bat`, `.cmd`, `.com`, `.vbs`,
-`.js`, `.wsf`, or `.msc` content whose meaning can change without any change to
-the approved path.
+further restricted to native `.exe` and `.com` targets: PATH resolution probes
+every `PATHEXT` entry, so a bare name can otherwise resolve to `.bat`, `.cmd`,
+`.vbs`, `.js`, `.wsf`, or `.msc` content whose meaning is delegated to an
+interpreter without any change to the approved path.
 
 For a successful binding, one immutable reusable command supplies the resolved
 path used for matching, the persisted pattern, usage metadata, and the direct

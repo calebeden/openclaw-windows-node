@@ -951,6 +951,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     [InlineData("mshta.exe")]
     [InlineData("regsvr32.exe")]
     [InlineData("rundll32.exe")]
+    [InlineData("powershell.com")]
     public void IndirectCommandHost_RecognizesAliasesPathsQuotesAndCasing(string token)
         => Assert.True(ExecCommandToken.IsIndirectCommandHost(token));
 
@@ -1261,9 +1262,9 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             StringComparison.OrdinalIgnoreCase);
     }
 
-    // The gateway forwards command text already tokenized across several argv
-    // elements. A binder that only accepts a single pre-joined tail element leaves
-    // the allowlist broken for exactly those requests.
+    // Low-level callers and upstream approval fixtures may provide a reconstructible
+    // tokenized tail even though the live gateway currently sends one pre-joined
+    // command element.
     [Fact]
     public async Task StoredWhereRule_MultiElementCarrierTail_ExecutesBoundDirectArgv()
     {

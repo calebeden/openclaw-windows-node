@@ -37,6 +37,39 @@ internal static class CanonicalCmdCarrier
     }
 
     /// <summary>
+    /// True only for the resolved system cmd.exe. Durable binding may look through
+    /// this carrier because Windows owns its parsing semantics; an arbitrary file
+    /// named cmd.exe must remain visible as the executable for one-time approval.
+    /// </summary>
+    internal static bool IsTrustedSystemCmdPath(string? resolvedPath)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(resolvedPath))
+            return false;
+
+        try
+        {
+            var actual = Path.GetFullPath(resolvedPath);
+            if (!IsCmdExecutable(actual))
+                return false;
+
+            foreach (var systemDirectory in SystemDirectories())
+            {
+                if (string.IsNullOrWhiteSpace(systemDirectory))
+                    continue;
+                var expected = Path.GetFullPath(Path.Combine(systemDirectory, "cmd.exe"));
+                if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// True only for a carrier we are willing to look THROUGH when deciding
     /// approval identity.
     ///
@@ -48,8 +81,10 @@ internal static class CanonicalCmdCarrier
     /// through: an unrecognized carrier falls through to the indirect-host
     /// rejection and stays unbindable.
     ///
-    /// The canonical gateway carrier uses the bare name. A fully-qualified path
-    /// is accepted only when it points into the Windows system directories.
+    /// The canonical gateway carrier uses the bare name. The binder separately
+    /// resolves that name and verifies the resulting image is in a Windows system
+    /// directory. A fully-qualified token is accepted here only when it already
+    /// points into one of those directories.
     /// </summary>
     internal static bool IsTrustedCarrierExecutable(string? executable)
     {
@@ -90,12 +125,13 @@ internal static class CanonicalCmdCarrier
     /// Recognizes <c>cmd[.exe] /d /s /c &lt;tail...&gt;</c> and reconstructs the single
     /// command-line string cmd.exe receives.
     ///
-    /// The tail may be a single pre-joined element or several already-tokenized
-    /// elements; upstream approval fixtures use both. A multi-element tail is only
-    /// reconstructible when every element is free of whitespace and quotes, because
-    /// otherwise the process-creation quoting is not recoverable by a plain space
-    /// join. Non-reconstructible tails return false so callers fail closed rather
-    /// than guessing at a different command than the one that will run.
+    /// The live gateway uses one pre-joined tail element. Low-level callers and
+    /// upstream approval fixtures may provide several already-tokenized elements.
+    /// A multi-element tail is reconstructible only when every element is free of
+    /// whitespace and quotes, because otherwise the process-creation quoting is not
+    /// recoverable by a plain space join. Non-reconstructible tails return false so
+    /// callers fail closed rather than guessing at a different command than the one
+    /// that will run.
     /// </summary>
     internal static bool TryGetCanonicalPayload(IReadOnlyList<string> argv, out string payload) =>
         TryGetCanonicalPayload(argv, requireTrustedCarrier: false, out payload);

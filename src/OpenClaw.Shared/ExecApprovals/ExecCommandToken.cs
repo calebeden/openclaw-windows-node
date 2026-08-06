@@ -20,11 +20,14 @@ internal static class ExecCommandToken
         return name.ToLowerInvariant();
     }
 
-    // Returns the basename without .exe suffix (lowercased).
+    // Returns the basename without a directly executable .exe/.com suffix (lowercased).
     internal static string NormalizedBasename(string token)
     {
         var b = BasenameLower(token);
-        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? b[..^4] : b;
+        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            || b.EndsWith(".com", StringComparison.OrdinalIgnoreCase)
+            ? b[..^4]
+            : b;
     }
 
     internal static bool IsEnv(string token) =>
