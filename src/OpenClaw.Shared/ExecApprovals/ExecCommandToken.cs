@@ -30,10 +30,14 @@ internal static class ExecCommandToken
     internal static bool IsEnv(string token) =>
         NormalizedBasename(token) == "env";
 
-    // A durable allow rule for one of these hosts delegates future meaning to a
-    // second command language. The rule would approve the host executable, not the
-    // script or command it interprets, so later invocations could execute different
-    // commands without another approval.
+    // A durable allow rule for one of these hosts delegates future meaning to
+    // argument-selected code, scripts, URLs, assemblies, or a second command
+    // language. The V2 store authorizes executable paths rather than exact argv, so
+    // later invocations could execute different content without another approval.
+    //
+    // This catalog is a maintained security boundary, matching the macOS binding
+    // model. When Windows adds a code-host binary, or this product supports a new
+    // runtime, add it here before allowing durable executable-level approval.
     private static readonly System.Collections.Generic.HashSet<string> s_indirectCommandHosts =
         new(StringComparer.Ordinal)
         {
@@ -45,6 +49,7 @@ internal static class ExecCommandToken
             "ruby", "jruby", "perl", "php", "lua", "luajit",
             "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
             "r", "rscript", "tclsh", "wish", "groovy",
+            "mshta", "regsvr32", "rundll32",
         };
 
     internal static bool IsIndirectCommandHost(string token)

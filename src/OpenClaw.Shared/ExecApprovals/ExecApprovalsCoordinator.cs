@@ -248,6 +248,14 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         // Step 8: build payload before any store writes — a fail-closed payload result
         // must not leave persistent allowlist state behind.
         var useReusableExecution = persistAllowlistEntry || fallbackAllowWasMatchDependent;
+        if (useReusableExecution && identity.ReusableCommand is null)
+        {
+            return LogAndReturn(
+                ExecApprovalV2Result.InternalError(
+                    "reusable-command-required-for-durable-allow"),
+                correlationId, promptAttempted, fallbackUsed,
+                canonical: context.DisplayCommand);
+        }
         var execution = useReusableExecution
             ? BuildReusableApprovedExecution(
                 identity.ReusableCommand,

