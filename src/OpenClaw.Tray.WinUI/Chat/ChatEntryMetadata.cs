@@ -60,6 +60,10 @@ namespace OpenClawTray.Chat;
 /// Stable client-side id for a local send. Used to attach a later gateway
 /// identity to the exact optimistic transcript row without text matching.
 /// </param>
+/// <param name="Attachments">
+/// Structured attachment presentation metadata. Gateway references never carry
+/// preview cache keys.
+/// </param>
 public sealed record ChatEntryMetadata(
     DateTimeOffset? Timestamp,
     string? Model,
@@ -75,4 +79,5 @@ public sealed record ChatEntryMetadata(
     long? CompactionTokensBefore = null,
     long? CompactionTokensAfter = null,
     bool IsLocalQueuedSend = false,
-    string? LocalQueuedMessageId = null);
+    string? LocalQueuedMessageId = null,
+    IReadOnlyList<ChatAttachmentPresentation>? Attachments = null);
