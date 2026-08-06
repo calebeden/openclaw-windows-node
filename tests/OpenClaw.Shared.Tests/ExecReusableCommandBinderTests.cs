@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
+using OpenClaw.Shared.Commands;
 using OpenClaw.Shared.ExecApprovals;
 using Xunit;
 
@@ -285,6 +286,68 @@ public class ExecReusableCommandBinderTests
 
         Assert.NotNull(bound);
         Assert.EndsWith("hostname.exe", bound!.Argv[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UntrustedCmdCopyCarrier_DoesNotBindInnerExecutable()
+    {
+        // A cmd.exe copy in a writable directory can ignore its arguments and run
+        // anything, so it must never be looked through: binding against the inner
+        // executable would show the operator a trusted path while the untrusted
+        // outer image is what an allow-once actually launches.
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), "openclaw-untrusted-cmd-" + Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            var rogueCmd = Path.Combine(dir, "cmd.exe");
+            File.Copy(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                rogueCmd);
+
+            var bound = ExecReusableCommandBinder.TryBind(
+                [rogueCmd, "/d", "/s", "/c", "hostname.exe"],
+                cwd: null,
+                env: null);
+
+            Assert.Null(bound);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void UntrustedCmdCopy_IsNotTrustedCarrier_ButStillSerializesAsCmd()
+    {
+        var rogueCmd = Path.Combine(Path.GetTempPath(), "writable", "cmd.exe");
+
+        // Trust side refuses to look through it.
+        Assert.False(CanonicalCmdCarrier.IsTrustedCarrierExecutable(rogueCmd));
+        Assert.False(CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(
+            [rogueCmd, "/d", "/s", "/c", "hostname.exe"], out _));
+
+        // Serialization side still recognizes it, so the cmd-aware quoting is used.
+        Assert.True(CanonicalCmdCarrier.IsCmdExecutable(rogueCmd));
+        Assert.True(CanonicalCmdCarrier.TryGetCanonicalPayload(
+            [rogueCmd, "/d", "/s", "/c", "hostname.exe"], out var payload));
+        Assert.Equal("hostname.exe", payload);
+    }
+
+    [Theory]
+    [InlineData("cmd")]
+    [InlineData("cmd.exe")]
+    [InlineData("CMD.EXE")]
+    public void BareCmdName_IsTrustedCarrier(string executable)
+    {
+        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(executable));
+    }
+
+    [Fact]
+    public void SystemDirectoryCmd_IsTrustedCarrier()
+    {
+        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")));
     }
 
     [Fact]

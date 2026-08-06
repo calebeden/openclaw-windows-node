@@ -26,7 +26,7 @@ internal static class ExecReusableCommandBinder
         if (command.Count == 0)
             return null;
 
-        if (CanonicalCmdCarrier.TryGetCanonicalPayload(command, out var payload))
+        if (CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(command, out var payload))
         {
             if (!TryTokenizeStaticCmdPayload(payload, out var payloadArgv))
                 return null;
