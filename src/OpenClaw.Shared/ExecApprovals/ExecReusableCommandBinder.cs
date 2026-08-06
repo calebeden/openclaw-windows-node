@@ -6,6 +6,15 @@ using OpenClaw.Shared.Commands;
 
 namespace OpenClaw.Shared.ExecApprovals;
 
+/// <summary>
+/// Derives the single identity that is eligible for durable allowlist authorization.
+///
+/// Two properties matter here and are easy to conflate. The identity is what the
+/// operator sees and what durable policy describes; the transport is what actually
+/// runs. For a canonical cmd carrier those differ, and the binder is what keeps them
+/// consistent: it looks through the carrier for identity while preserving the carrier
+/// for execution.
+/// </summary>
 internal static class ExecReusableCommandBinder
 {
     private static readonly HashSet<string> s_cmdBuiltins = new(StringComparer.OrdinalIgnoreCase)
@@ -18,49 +27,109 @@ internal static class ExecReusableCommandBinder
         "ver", "verify", "vol",
     };
 
+    /// <summary>
+    /// Why a command could not be bound to a durable identity. The command may still
+    /// be approved as a one-time operation; this only explains why no reusable rule
+    /// is offered, so the reason can be surfaced instead of a silent null.
+    /// </summary>
+    internal enum BindFailure
+    {
+        None = 0,
+        EmptyCommand,
+        NonCanonicalCmdCarrier,
+        UntrustedCarrierImage,
+        CarrierPayloadNotStatic,
+        CarrierPayloadIsBuiltin,
+        ShellWrapper,
+        EnvWrapperHasModifiers,
+        ExecutableNotResolved,
+        ExecutableNotFound,
+        ExecutableNotBindable,
+        ExecutableOnNetworkPath,
+    }
+
     internal static ExecReusableCommand? TryBind(
         IReadOnlyList<string> command,
         string? cwd,
         IReadOnlyDictionary<string, string>? env)
-    {
-        if (command.Count == 0)
-            return null;
+        => TryBind(command, cwd, env, out _);
 
-        if (CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(command, out var payload))
+    internal static ExecReusableCommand? TryBind(
+        IReadOnlyList<string> command,
+        string? cwd,
+        IReadOnlyDictionary<string, string>? env,
+        out BindFailure failure)
+    {
+        failure = BindFailure.None;
+        if (command.Count == 0)
         {
-            if (!TryTokenizeStaticCmdPayload(payload, out var payloadArgv))
+            failure = BindFailure.EmptyCommand;
+            return null;
+        }
+
+        if (CanonicalCmdCarrier.IsCmdExecutable(command[0]))
+        {
+            if (!CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(command, out var payload))
+            {
+                // Distinguish the two ways a cmd-shaped argv can fail so the operator
+                // and the logs can tell "we do not understand this shape" apart from
+                // "this cmd image is not the system one".
+                failure = CanonicalCmdCarrier.TryGetCanonicalPayload(command, out _)
+                    ? BindFailure.UntrustedCarrierImage
+                    : BindFailure.NonCanonicalCmdCarrier;
                 return null;
+            }
+
+            if (!TryTokenizeStaticCmdPayload(payload, out var payloadArgv))
+            {
+                failure = BindFailure.CarrierPayloadNotStatic;
+                return null;
+            }
             if (payloadArgv.Count == 0
                 || ExecCommandToken.IsEnv(payloadArgv[0])
                 || s_cmdBuiltins.Contains(ExecCommandToken.NormalizedBasename(payloadArgv[0])))
             {
+                failure = BindFailure.CarrierPayloadIsBuiltin;
                 return null;
             }
-            return BindDirect(payloadArgv, cwd, env);
+
+            // Identity looks through the carrier; transport stays the original argv.
+            return BindDirect(payloadArgv, cwd, env, command, out failure);
         }
 
         if (ExecShellWrapperNormalizer.Extract(command).IsWrapper)
         {
+            failure = BindFailure.ShellWrapper;
             return null;
         }
 
-        return BindDirect(command, cwd, env);
+        return BindDirect(command, cwd, env, executionArgv: null, out failure);
     }
 
     private static ExecReusableCommand? BindDirect(
         IReadOnlyList<string> argv,
         string? cwd,
-        IReadOnlyDictionary<string, string>? env)
+        IReadOnlyDictionary<string, string>? env,
+        IReadOnlyList<string>? executionArgv,
+        out BindFailure failure)
     {
+        failure = BindFailure.None;
         if (argv.Count == 0)
+        {
+            failure = BindFailure.EmptyCommand;
             return null;
+        }
 
         if (ExecEnvInvocationUnwrapper.AnyWrapperHasModifiers(argv))
+        {
+            failure = BindFailure.EnvWrapperHasModifiers;
             return null;
+        }
         var effectiveArgv = ExecEnvInvocationUnwrapper.UnwrapForResolution(argv);
         if (effectiveArgv.Count == 0
             || ExecCommandToken.IsEnv(effectiveArgv[0]))
         {
+            failure = BindFailure.ExecutableNotResolved;
             return null;
         }
 
@@ -68,11 +137,24 @@ internal static class ExecReusableCommandBinder
         var resolvedPath = resolution?.ResolvedPath;
         if (resolution is null
             || string.IsNullOrWhiteSpace(resolvedPath)
-            || !Path.IsPathFullyQualified(resolvedPath)
-            || !File.Exists(resolvedPath)
-            || !IsBindableExecutable(resolvedPath)
-            || ExecCommandToken.IsIndirectCommandHost(resolvedPath))
+            || !Path.IsPathFullyQualified(resolvedPath))
         {
+            failure = BindFailure.ExecutableNotResolved;
+            return null;
+        }
+        if (IsNetworkPath(resolvedPath))
+        {
+            failure = BindFailure.ExecutableOnNetworkPath;
+            return null;
+        }
+        if (!File.Exists(resolvedPath))
+        {
+            failure = BindFailure.ExecutableNotFound;
+            return null;
+        }
+        if (!IsBindableExecutable(resolvedPath))
+        {
+            failure = BindFailure.ExecutableNotBindable;
             return null;
         }
 
@@ -80,7 +162,49 @@ internal static class ExecReusableCommandBinder
         boundArgv[0] = resolvedPath;
         for (var i = 1; i < effectiveArgv.Count; i++)
             boundArgv[i] = effectiveArgv[i];
-        return new ExecReusableCommand(boundArgv, resolution.Value);
+
+        return new ExecReusableCommand(boundArgv, resolution.Value, executionArgv);
+    }
+
+    /// <summary>
+    /// True for a UNC path or a path on a network-mapped drive.
+    ///
+    /// A durable rule records a path, and the content behind a network path is
+    /// controlled by whoever serves the share rather than by the local machine, so a
+    /// remote executable is never eligible for reuse. Allow-once still works.
+    /// </summary>
+    internal static bool IsNetworkPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)
+            || path.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root) || root.Length < 2 || root[1] != ':')
+            return false;
+
+        try
+        {
+            return new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            // An unavailable drive cannot be shown to be local, so refuse durable reuse.
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 
     internal static bool TryTokenizeStaticCmdPayload(
@@ -150,4 +274,22 @@ internal static class ExecReusableCommandBinder
         var extension = Path.GetExtension(path);
         return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>Stable diagnostic token for logs and prompts.</summary>
+    internal static string DescribeFailure(BindFailure failure) => failure switch
+    {
+        BindFailure.None => "bound",
+        BindFailure.EmptyCommand => "empty-command",
+        BindFailure.NonCanonicalCmdCarrier => "non-canonical-cmd-carrier",
+        BindFailure.UntrustedCarrierImage => "untrusted-cmd-carrier-image",
+        BindFailure.CarrierPayloadNotStatic => "carrier-payload-not-static",
+        BindFailure.CarrierPayloadIsBuiltin => "carrier-payload-is-shell-builtin",
+        BindFailure.ShellWrapper => "shell-wrapper",
+        BindFailure.EnvWrapperHasModifiers => "env-wrapper-has-modifiers",
+        BindFailure.ExecutableNotResolved => "executable-not-resolved",
+        BindFailure.ExecutableNotFound => "executable-not-found",
+        BindFailure.ExecutableNotBindable => "executable-not-bindable",
+        BindFailure.ExecutableOnNetworkPath => "executable-on-network-path",
+        _ => "unknown",
+    };
 }

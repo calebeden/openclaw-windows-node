@@ -81,7 +81,8 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         var needsAllowlistMatches = resolved.Defaults.Security == ExecSecurity.Allowlist
             || resolved.Defaults.AskFallback == ExecSecurity.Allowlist;
         IReadOnlyList<ExecAllowlistEntry> matches = needsAllowlistMatches
-            ? ExecAllowlistMatcher.MatchAll(resolved.Allowlist, identity.AllowlistResolutions)
+            ? ExecAllowlistMatcher.MatchAll(
+                resolved.Allowlist, identity.AllowlistResolutions, identity.ReusableCommand)
             : [];
 
         var context = new ExecApprovalEvaluation(
@@ -142,6 +143,17 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             return ExecApprovalV2Result.Allow(preApprovedExecution);
         }
         // RequiresPromptOutcome → continue to prompt/fallback block
+
+        // A command that could not be bound to a durable identity can only ever be
+        // approved as a one-time operation, no matter what the operator chooses. Log
+        // why once, here, so an allowlist that "does not work" is diagnosable from the
+        // node log alone instead of requiring a debugger.
+        if (identity.ReusableCommand is null && identity.ReusableBindFailure is not null)
+        {
+            _logger.Info($"[EXEC-APPROVALS] [{correlationId}] " +
+                $"canonical=\"{SanitizeForLog(context.DisplayCommand)}\" " +
+                $"reusable=none reason={identity.ReusableBindFailure}");
+        }
 
         // Steps 5-8: prompt/fallback + second pass (critical section) + side effect flag
         bool promptAttempted = false;
@@ -288,7 +300,7 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         // Each side effect is independently best-effort so a failure in one does not skip the other.
         if (persistAllowlistEntry && context.Security == ExecSecurity.Allowlist)
         {
-            try { await PersistAllowlistEntriesAsync(context).ConfigureAwait(false); }
+            try { await PersistAllowlistEntriesAsync(context, identity.ReusableCommand).ConfigureAwait(false); }
             catch (Exception ex) { _logger.Warn($"[EXEC-APPROVALS] [{correlationId}] side-effect: persist-entry failed (non-fatal): {ex.Message}"); }
         }
         try { await RecordAllowlistUsageAsync(context).ConfigureAwait(false); }
@@ -409,14 +421,26 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             || string.IsNullOrWhiteSpace(resolvedPath)
             || !Path.IsPathFullyQualified(resolvedPath)
             || !File.Exists(resolvedPath)
-            || ExecCommandToken.IsIndirectCommandHost(resolvedPath)
+            || ExecReusableCommandBinder.IsNetworkPath(resolvedPath)
             || !ExecReusableCommandBinder.IsBindableExecutable(resolvedPath))
         {
             return null;
         }
 
+        // Approval identity and execution transport are separate. The identity is the
+        // inner executable that was evaluated and shown; the transport is whatever the
+        // binder said must actually run. For a canonical carrier those differ, and the
+        // carrier is preserved verbatim because it carries the environment bootstrap
+        // the sandbox depends on. Substituting the bound direct argv here would change
+        // what runs without changing what was approved.
+        if (reusableCommand.IsCarrierTransport
+            && !CarrierTransportMatchesRequest(reusableCommand.ExecutionArgv, identity.Command))
+        {
+            return null;
+        }
+
         return new ExecApprovedExecution(
-            reusableCommand.Argv,
+            reusableCommand.ExecutionArgv,
             identity.Cwd,
             identity.TimeoutMs,
             sanitizedEnv)
@@ -426,15 +450,40 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         };
     }
 
+    // The carrier that runs must be exactly the argv that was validated and evaluated.
+    // Anything else means a rewritten command line reached execution, which is the one
+    // way metacharacter drift could be introduced between approval and launch.
+    internal static bool CarrierTransportMatchesRequest(
+        IReadOnlyList<string> executionArgv,
+        IReadOnlyList<string> requestArgv)
+    {
+        if (executionArgv.Count != requestArgv.Count)
+            return false;
+        for (var i = 0; i < executionArgv.Count; i++)
+        {
+            if (!string.Equals(executionArgv[i], requestArgv[i], StringComparison.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
     // Persists allowAlways patterns after an AllowAlways prompt decision (non-empty only).
     // Caller guarantees Security == Allowlist (guard is in HandleAsync step 8).
-    private async Task PersistAllowlistEntriesAsync(ExecApprovalEvaluation context)
+    // The argument binding travels with the pattern so a rule for an argument-selected
+    // host is never written without it.
+    private async Task PersistAllowlistEntriesAsync(
+        ExecApprovalEvaluation context,
+        ExecReusableCommand? reusableCommand)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var pattern in context.AllowAlwaysPatterns)
         {
             if (string.IsNullOrWhiteSpace(pattern) || !seen.Add(pattern)) continue;
-            await _store.AddAllowlistEntryAsync(context.AgentId, pattern).ConfigureAwait(false);
+            await _store.AddAllowlistEntryAsync(
+                context.AgentId,
+                pattern,
+                reusableCommand?.ArgPattern,
+                context.DisplayCommand).ConfigureAwait(false);
         }
     }
 
@@ -452,7 +501,7 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
                 ? context.AllowlistResolutions[i].ResolvedPath
                 : null;
             await _store.RecordAllowlistUseAsync(
-                context.AgentId, pattern, resolvedPath)
+                context.AgentId, pattern, resolvedPath, context.DisplayCommand)
                 .ConfigureAwait(false);
         }
     }

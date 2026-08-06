@@ -30,79 +30,19 @@ internal static class ExecCommandToken
     internal static bool IsEnv(string token) =>
         NormalizedBasename(token) == "env";
 
-    // A durable allow rule for one of these hosts delegates future meaning to
-    // argument-selected code, scripts, URLs, assemblies, or a second command
-    // language. The V2 store authorizes executable paths rather than exact argv, so
-    // later invocations could execute different content without another approval.
+    // NOTE: an earlier revision kept a catalog of interpreter and script-host
+    // basenames here and refused durable approval for each. That control has been
+    // removed rather than expanded. It failed in both directions: the list could
+    // never enumerate every binary that can proxy execution, and a renamed copy
+    // defeated a basename lookup entirely.
     //
-    // This catalog is a maintained security boundary. It is NOT the macOS model:
-    // macOS binds a durable entry to an executable plus an argPattern, so a wrapper
-    // can be approved against a specific argument form instead of being refused.
-    // Until the Windows policy schema carries an argument constraint, this catalog
-    // is what stands in for that binding, so it must be kept current.
-    //
-    // Known limitation: matching is by basename, so a renamed copy of a code host
-    // (for example powershell.exe copied to ps.exe) is not recognized. Treat this
-    // as defense in depth against accidental over-approval, not as a control that
-    // withstands a deliberately renamed binary.
-    //
-    // When Windows adds a code-host binary, or this product supports a new runtime,
-    // add it here before allowing durable executable-level approval.
-    private static readonly System.Collections.Generic.HashSet<string> s_indirectCommandHosts =
-        new(StringComparer.Ordinal)
-        {
-            "sh", "bash", "zsh", "dash", "ash", "ksh", "fish",
-            "cmd", "powershell", "pwsh",
-            "wsl", "cscript", "wscript",
-            "py", "pyw", "python", "pythonw", "pypy",
-            "node", "nodejs", "deno", "bun", "qjs",
-            "ruby", "jruby", "perl", "php", "lua", "luajit",
-            "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
-            "r", "rscript", "tclsh", "wish", "groovy",
-            "mshta", "regsvr32", "rundll32",
-            // Windows binaries that compile, load, or proxy execution of
-            // argument-selected code. Allow-once still works for these; only
-            // durable executable-level approval is withheld.
-            "msbuild", "csc", "vbc", "dnx", "rcsi",
-            "installutil", "regasm", "regsvcs", "mavinject",
-            "msiexec", "certutil", "bitsadmin", "wmic",
-            "forfiles", "scriptrunner", "pcalua", "cmstp", "odbcconf",
-            "msdt", "ieexec", "presentationhost", "winrs", "hh", "msxsl", "xwizard",
-        };
+    // Its job is now done structurally and unconditionally. Every rule this node
+    // generates pins the command's arguments (see ExecArgPattern), so a rule for an
+    // interpreter authorizes one script rather than the interpreter itself, and
+    // wrapper invocations are classified by shape rather than by name
+    // (ExecShellWrapperNormalizer, CanonicalCmdCarrier). Do not reintroduce a
+    // name-based list as the security boundary.
 
-    internal static bool IsIndirectCommandHost(string token)
-    {
-        var basename = NormalizedBasename(token);
-        return s_indirectCommandHosts.Contains(basename)
-            || IsVersionedInterpreter(basename, "python")
-            || IsVersionedInterpreter(basename, "pythonw")
-            || IsVersionedInterpreter(basename, "pypy");
-    }
-
-    private static bool IsVersionedInterpreter(string basename, string prefix)
-    {
-        if (!basename.StartsWith(prefix, StringComparison.Ordinal)
-            || basename.Length == prefix.Length)
-        {
-            return false;
-        }
-
-        var suffix = basename.AsSpan(prefix.Length);
-        var sawDigit = false;
-        foreach (var ch in suffix)
-        {
-            if (char.IsDigit(ch))
-            {
-                sawDigit = true;
-                continue;
-            }
-
-            if (ch != '.')
-                return false;
-        }
-
-        return sawDigit;
-    }
 
     // Extracts the first shell-tokenized word from a command pattern. Quoted paths
     // remain one token, and a suffix after the closing quote is preserved so

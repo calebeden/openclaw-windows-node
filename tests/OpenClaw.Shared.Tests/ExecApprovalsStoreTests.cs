@@ -42,6 +42,31 @@ public class ExecApprovalsStoreTests : IDisposable
 
     // ── Prompt-on-miss when file absent ──────────────────────────────────────
 
+    // A generated entry is only safe because its argument pattern is what makes it
+    // match. Rewriting the file must not drop argPattern or source: losing either one
+    // silently converts a narrow generated rule into a path-only rule, which is a
+    // wider grant than the operator ever approved.
+    [Fact]
+    public async Task Normalization_PreservesGeneratedEntryBinding()
+    {
+        WriteFile(
+            """
+            {"version":1,"defaults":{"security":"allowlist","ask":"on-miss"},"agents":{"main":{"allowlist":[
+              {"pattern":"C:\\tools\\a.exe","source":"allow-always","argPattern":"^--one\u0000\u0000$","commandText":"a.exe --one"}
+            ]}}}
+            """);
+
+        // Any write goes through the same normalization path that rebuilds every entry.
+        await Store().AddAllowlistEntryAsync("main", "C:\\tools\\b.exe");
+
+        var entry = Assert.Single(
+            Store().ResolveReadOnly("main").Allowlist,
+            candidate => candidate.Pattern == "C:\\tools\\a.exe");
+        Assert.Equal("allow-always", entry.Source);
+        Assert.Equal("^--one\u0000\u0000$", entry.ArgPattern);
+        Assert.Equal("a.exe --one", entry.CommandText);
+    }
+
     [Fact]
     public void ResolveReadOnly_NoFile_ReturnsAllowlistOnMiss()
     {

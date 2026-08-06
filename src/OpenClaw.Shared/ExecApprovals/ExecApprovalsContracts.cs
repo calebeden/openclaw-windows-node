@@ -36,8 +36,25 @@ public sealed class ExecAllowlistEntry
 {
     public Guid? Id { get; set; }
     public string? Pattern { get; set; }
+
+    // Durable argument binding. Null means the rule authorizes the executable for any
+    // arguments; non-null pins the rule to one argument form. Every rule this node
+    // generates carries one, so a generated rule always describes a single operation.
+    public string? ArgPattern { get; set; }
+
+    // Provenance. "allow-always" marks a rule this node generated from an operator's
+    // Allow always decision; a hand-written rule has none. Matching depends on this:
+    // a generated rule that carries no argument binding predates argument binding and
+    // is not honored, while a hand-written path-only rule is deliberate and is.
+    public string? Source { get; set; }
+
+    // Human-readable command this rule was created from. Display and audit only:
+    // never an input to matching, so a rewritten commandText cannot widen a rule.
+    public string? CommandText { get; set; }
+
     public double? LastUsedAt { get; set; }
     public string? LastResolvedPath { get; set; }
+    public string? LastUsedCommand { get; set; }
 }
 
 // ── Persisted config contracts ────────────────────────────────────────────────

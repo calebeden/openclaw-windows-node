@@ -52,7 +52,12 @@ public static class ExecApprovalV2Normalizer
         // Durable authorization has one source of truth. Shell inspection may identify
         // inner commands for diagnostics, but only a safely bound reusable command may
         // satisfy an allowlist or produce an Allow Always pattern.
-        var reusableCommand = ExecReusableCommandBinder.TryBind(argv, cwd, env);
+        //
+        // The failure reason is carried forward rather than discarded. Without it, a
+        // command that is offered as one-time only looks indistinguishable from one
+        // that simply missed the allowlist, which is the hardest class of exec
+        // approval problem to diagnose from a log.
+        var reusableCommand = ExecReusableCommandBinder.TryBind(argv, cwd, env, out var bindFailure);
         IReadOnlyList<ExecCommandResolution> allowlistResolutions =
             reusableCommand is null ? [] : [reusableCommand.Resolution];
         IReadOnlyList<string> allowAlwaysPatterns =
@@ -75,7 +80,9 @@ public static class ExecApprovalV2Normalizer
             env,
             request.AgentId,
             request.SessionKey,
-            reusableCommand);
+            reusableCommand,
+            request.RawCommand,
+            reusableCommand is null ? ExecReusableCommandBinder.DescribeFailure(bindFailure) : null);
 
         return ExecApprovalV2NormalizationOutcome.Ok(identity);
     }
