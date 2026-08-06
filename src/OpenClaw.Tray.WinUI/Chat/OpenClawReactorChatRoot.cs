@@ -1011,6 +1011,16 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
                 PlaceholderFor(props.ConnectionState))
             .AutomationId("ChatComposerInput")
             .AutomationName(PlaceholderFor(props.ConnectionState))
+            .OnPreviewKeyDown((_, args) =>
+            {
+                if (args.Key != global::Windows.System.VirtualKey.V)
+                    return;
+
+                var control = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
+                    global::Windows.System.VirtualKey.Control);
+                if (control.HasFlag(global::Windows.UI.Core.CoreVirtualKeyStates.Down))
+                    LogClipboardImagePasteDiagnostic("shortcut");
+            })
             .OnKeyDown((sender, args) =>
             {
                 if (slashDisplay.IsVisible)
@@ -1115,20 +1125,22 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
                     pasteHooked.Current = true;
                     control.Paste += async (_, args) =>
                     {
-                        var clipboardContent = global::Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
-                        if (clipboardContent is null
-                            || !clipboardContent.Contains(
-                                global::Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
-                        {
-                            return;
-                        }
-
-                        // Paste is a synchronous routed event. Suppress the default text paste
-                        // before awaiting bitmap extraction so a multi-format clipboard cannot
-                        // insert text alongside the image attachment.
-                        args.Handled = true;
                         try
                         {
+                            var clipboardContent =
+                                global::Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+                            LogClipboardImagePasteDiagnostic("paste-event", clipboardContent);
+                            if (clipboardContent is null
+                                || !clipboardContent.Contains(
+                                    global::Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
+                            {
+                                return;
+                            }
+
+                            // Paste is a synchronous routed event. Suppress the default text paste
+                            // before awaiting bitmap extraction so a multi-format clipboard cannot
+                            // insert text alongside the image attachment.
+                            args.Handled = true;
                             var attachment = await TryReadImageFromClipboardAsync(clipboardContent);
                             if (attachment is null)
                                 return;
@@ -1138,7 +1150,8 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
                         catch (Exception ex)
                         {
                             OpenClawTray.Services.Logger.Debug(
-                                $"Reactor chat composer: clipboard image paste failed: {ex.Message}");
+                                $"Reactor chat composer: image paste diagnostic stage=paste-event " +
+                                $"outcome=failed error_type={ex.GetType().Name} hresult=0x{ex.HResult:X8}");
                         }
                     };
                 }
@@ -1717,6 +1730,8 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
         using var input = await streamRef.OpenReadAsync();
         var decoder = await global::Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(input);
         using var bitmap = await decoder.GetSoftwareBitmapAsync();
+        var width = bitmap.PixelWidth;
+        var height = bitmap.PixelHeight;
         using var output = new global::Windows.Storage.Streams.InMemoryRandomAccessStream();
         var encoder = await global::Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(
             global::Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId,
@@ -1726,7 +1741,12 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
 
         var size = (long)output.Size;
         if (size > ChatAttachment.MaxSizeBytes)
+        {
+            OpenClawTray.Services.Logger.Debug(
+                $"Reactor chat composer: image paste diagnostic stage=decode outcome=too-large " +
+                $"width={width} height={height} encoded_bytes={size} max_bytes={ChatAttachment.MaxSizeBytes}");
             return null;
+        }
 
         output.Seek(0);
         var bytes = new byte[size];
@@ -1736,6 +1756,9 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
             reader.ReadBytes(bytes);
         }
 
+        OpenClawTray.Services.Logger.Debug(
+            $"Reactor chat composer: image paste diagnostic stage=decode outcome=accepted " +
+            $"width={width} height={height} encoded_bytes={size}");
         return new ChatAttachment
         {
             Type = "image",
@@ -1744,6 +1767,39 @@ public sealed class ReactorChatComposer : Component<ReactorChatComposerProps>
             Content = Convert.ToBase64String(bytes),
             SizeBytes = size,
         };
+    }
+
+    private static void LogClipboardImagePasteDiagnostic(
+        string stage,
+        global::Windows.ApplicationModel.DataTransfer.DataPackageView? content = null)
+    {
+        try
+        {
+            content ??= global::Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+            if (content is null)
+            {
+                OpenClawTray.Services.Logger.Debug(
+                    $"Reactor chat composer: image paste diagnostic stage={stage} outcome=no-content");
+                return;
+            }
+
+            var formats = ClipboardImagePasteDiagnostics.FormatAvailableFormats(content.AvailableFormats);
+            var hasBitmap = content.Contains(
+                global::Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap);
+            var hasStorageItems = content.Contains(
+                global::Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems);
+            var hasText = content.Contains(
+                global::Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text);
+            OpenClawTray.Services.Logger.Debug(
+                $"Reactor chat composer: image paste diagnostic stage={stage} outcome=observed " +
+                $"bitmap={hasBitmap} storage_items={hasStorageItems} text={hasText} formats=[{formats}]");
+        }
+        catch (Exception ex)
+        {
+            OpenClawTray.Services.Logger.Debug(
+                $"Reactor chat composer: image paste diagnostic stage={stage} " +
+                $"outcome=clipboard-read-failed error_type={ex.GetType().Name} hresult=0x{ex.HResult:X8}");
+        }
     }
 
     private static string PlaceholderFor(string connectionState) => connectionState switch

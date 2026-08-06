@@ -228,6 +228,22 @@ public sealed class ChatTimelinePresentationTests
     }
 
     [Fact]
+    public void ReactorComposer_LogsClipboardFormatsBeforeTextBoxPasteRouting()
+    {
+        var root = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Chat",
+            "OpenClawReactorChatRoot.cs"));
+
+        Assert.Contains(".OnPreviewKeyDown((_, args) =>", root);
+        Assert.Contains("LogClipboardImagePasteDiagnostic(\"shortcut\")", root);
+        Assert.Contains("LogClipboardImagePasteDiagnostic(\"paste-event\", clipboardContent)", root);
+        Assert.Contains("ClipboardImagePasteDiagnostics.FormatAvailableFormats(content.AvailableFormats)", root);
+    }
+
+    [Fact]
     public void ReactorComposer_UsesReactorThemeResourcesWithoutManualThemeObservation()
     {
         var root = File.ReadAllText(Path.Combine(
