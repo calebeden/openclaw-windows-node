@@ -415,6 +415,29 @@ internal static class ExecCommandResolver
         return null;
     }
 
+    /// <summary>
+    /// True when a bare command name would resolve to a file in <paramref name="cwd"/>.
+    ///
+    /// Our PATH search deliberately excludes the current directory, but cmd.exe searches
+    /// it <em>first</em>. When a carrier's payload is a bare name and the current
+    /// directory holds a matching file, the executable cmd.exe would launch is not the
+    /// one we resolved, so the caller must refuse to bind a durable approval.
+    /// </summary>
+    internal static bool HasCurrentDirectoryCandidate(
+        string name,
+        string? cwd,
+        IReadOnlyDictionary<string, string>? env)
+    {
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(cwd))
+            return false;
+        // Only bare names are ambiguous. Anything carrying a separator is resolved
+        // relative to the current directory by both cmd.exe and our resolver.
+        if (name.IndexOfAny(['\\', '/']) >= 0)
+            return false;
+
+        return FindInPath(name, [cwd], GetPathExtensions(env)) is not null;
+    }
+
     private static string? FindInPath(
         string name,
         IReadOnlyList<string> searchPaths,

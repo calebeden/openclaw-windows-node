@@ -11,6 +11,129 @@ namespace OpenClaw.Shared.Tests;
 
 public class ExecReusableCommandBinderTests
 {
+    // The carrier is executed verbatim, so cmd.exe re-resolves the payload executable at
+    // launch and searches the current directory before PATH. Our resolver never searches
+    // the current directory. If both were allowed to resolve independently, the binder
+    // would authorize the PATH copy while cmd.exe launched the cwd copy: a durable
+    // approval for one binary silently spending on another. Refuse to bind instead.
+    [Fact]
+    public void CarrierPayloadShadowedByCurrentDirectory_DoesNotBind()
+    {
+        var cwd = Directory.CreateTempSubdirectory("openclaw-cwd-shadow").FullName;
+        try
+        {
+            var shadow = Path.Combine(cwd, "hostname.exe");
+            File.WriteAllBytes(shadow, [0x4D, 0x5A]);
+
+            ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd,
+                env: null,
+                out var failure);
+
+            Assert.Equal(
+                ExecReusableCommandBinder.BindFailure.CarrierPayloadExecutableAmbiguous,
+                failure);
+            Assert.Equal(
+                "carrier-payload-executable-ambiguous",
+                ExecReusableCommandBinder.DescribeFailure(failure));
+        }
+        finally
+        {
+            Directory.Delete(cwd, recursive: true);
+        }
+    }
+
+    // The same carrier binds normally when the current directory holds no shadow, so the
+    // guard above closes the hijack without closing the headline case.
+    [Fact]
+    public void CarrierPayloadWithoutCurrentDirectoryShadow_StillBinds()
+    {
+        var cwd = Directory.CreateTempSubdirectory("openclaw-cwd-clean").FullName;
+        try
+        {
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd,
+                env: null,
+                out var failure);
+
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.NotNull(bound);
+            Assert.EndsWith(
+                @"\hostname.exe",
+                bound!.Resolution.ResolvedPath,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(cwd, recursive: true);
+        }
+    }
+
+    // A relative payload already resolves against the current directory in both the
+    // binder and cmd.exe, so it is not ambiguous and must keep binding.
+    [Fact]
+    public void CarrierPayloadWithExplicitRelativePath_IsNotTreatedAsAmbiguous()
+    {
+        var cwd = Directory.CreateTempSubdirectory("openclaw-cwd-relative").FullName;
+        try
+        {
+            var tool = Path.Combine(cwd, "tool.exe");
+            File.WriteAllBytes(tool, [0x4D, 0x5A]);
+
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", @".\tool.exe"],
+                cwd,
+                env: null,
+                out var failure);
+
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.Equal(tool, bound!.Resolution.ResolvedPath, ignoreCase: true);
+        }
+        finally
+        {
+            Directory.Delete(cwd, recursive: true);
+        }
+    }
+
+    // NUL is the argument separator inside a persisted argPattern, so an argument that
+    // contains one renders identically to two separate arguments. Persisting it would let
+    // a stored rule authorize a differently segmented argv. Reject before anything is
+    // bound or written.
+    [Fact]
+    public void ArgumentContainingNul_DoesNotBind()
+    {
+        ExecReusableCommandBinder.TryBind(
+            [@"C:\Windows\System32\hostname.exe", "a\0b"],
+            cwd: null,
+            env: null,
+            out var failure);
+
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ArgumentContainsNul, failure);
+        Assert.Equal("argument-contains-nul", ExecReusableCommandBinder.DescribeFailure(failure));
+    }
+
+    // The collision the rejection above prevents: without it, these two argv lists would
+    // produce the same persisted argument binding.
+    [Fact]
+    public void NulBearingArgument_CannotShareABindingWithSplitArguments()
+    {
+        var split = ExecReusableCommandBinder.TryBind(
+            [@"C:\Windows\System32\hostname.exe", "a", "b"],
+            cwd: null,
+            env: null,
+            out _);
+        Assert.NotNull(split);
+
+        var joined = ExecReusableCommandBinder.TryBind(
+            [@"C:\Windows\System32\hostname.exe", "a\0b"],
+            cwd: null,
+            env: null,
+            out _);
+        Assert.Null(joined);
+    }
+
     // D3: a durable rule names a path, not the bytes at that path. A path on a remote
     // share is controlled by whoever controls the share, so an approval granted once
     // could silently authorize replaced content later. Refuse those outright.

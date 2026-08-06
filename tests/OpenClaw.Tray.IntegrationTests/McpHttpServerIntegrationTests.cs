@@ -219,6 +219,57 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
         Assert.Contains("cannot add or change allowlist entries", text, StringComparison.OrdinalIgnoreCase);
     }
 
+    // A remote update may retain existing entries, but "retain" has to mean the whole
+    // authorization decision, not just the path. Keeping the pattern while dropping
+    // argPattern/source would silently widen a generated, argument-bound rule into a
+    // path-only grant for that executable: remote privilege escalation without adding
+    // a single entry.
+    [IntegrationFact]
+    public async Task SystemExecApprovals_SetRejectsStrippedArgumentBinding()
+    {
+        using var beforeDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
+        var baseHash = beforeDoc.RootElement.GetProperty("hash").GetString()!;
+
+        var (isError, text) = await _fixture.Client.CallToolAcceptingFailureAsync(
+            "system.execApprovals.set",
+            new
+            {
+                baseHash,
+                file = new
+                {
+                    version = 1,
+                    defaults = new { security = "allowlist", ask = "off", askFallback = "deny", autoAllowSkills = false },
+                    agents = new Dictionary<string, object>
+                    {
+                        ["main"] = new
+                        {
+                            security = "allowlist",
+                            ask = "off",
+                            askFallback = "deny",
+                            autoAllowSkills = false,
+                            allowlist = new object[]
+                            {
+                                new { id = TrayAppFixture.SeededExecApprovalId, pattern = TrayAppFixture.SeededExecApprovalPattern },
+                                // Same id and same path, but the argument binding is gone.
+                                new
+                                {
+                                    id = TrayAppFixture.SeededBoundExecApprovalId,
+                                    pattern = TrayAppFixture.SeededBoundExecApprovalPattern,
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+
+        Assert.True(isError, $"Expected a stripped argument binding to be rejected; response: {text}");
+        Assert.Contains("cannot add or change allowlist entries", text, StringComparison.OrdinalIgnoreCase);
+
+        // And the narrow rule must still be intact on disk.
+        using var afterDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
+        Assert.Equal(baseHash, afterDoc.RootElement.GetProperty("hash").GetString());
+    }
+
     // ---- screen.* ----
     // Canonical OpenClaw protocol: screen.snapshot + screen.record only.
     // No screen.list / screen.capture (those were stale drift from the prior

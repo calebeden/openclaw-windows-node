@@ -195,6 +195,20 @@ public sealed class ExecApprovalsStore
 
     public Task<bool> RecordAllowlistUseAsync(
         string? agentId, string pattern, string? resolvedPath, string? lastUsedCommand)
+        => RecordAllowlistUseAsync(agentId, pattern, resolvedPath, lastUsedCommand, entryId: null, argPattern: null);
+
+    // Several entries can now share one pattern and be distinguished only by their
+    // argument binding, so usage must be stamped on the entry that actually authorized
+    // the run. entryId identifies it exactly; argPattern disambiguates legacy entries
+    // written before ids were persisted. With neither, this falls back to the historical
+    // pattern-wide stamp.
+    public Task<bool> RecordAllowlistUseAsync(
+        string? agentId,
+        string pattern,
+        string? resolvedPath,
+        string? lastUsedCommand,
+        Guid? entryId,
+        string? argPattern)
     {
         if (string.IsNullOrEmpty(pattern)) return Task.FromResult(false);
         var key = NormalizeAgentId(agentId);
@@ -208,8 +222,7 @@ public sealed class ExecApprovalsStore
                     continue;
                 foreach (var entry in agent.Allowlist)
                 {
-                    if (!string.Equals(entry.Pattern?.Trim(), pattern.Trim(),
-                            StringComparison.OrdinalIgnoreCase))
+                    if (!IsUsageTarget(entry, pattern, entryId, argPattern))
                         continue;
                     entry.LastUsedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     entry.LastResolvedPath = resolvedPath;  // Id, Pattern, ArgPattern preserved
@@ -220,6 +233,25 @@ public sealed class ExecApprovalsStore
             }
             return changed;
         });
+    }
+
+    private static bool IsUsageTarget(
+        ExecAllowlistEntry entry, string pattern, Guid? entryId, string? argPattern)
+    {
+        // An id is unique across buckets, so it alone identifies the authorizing entry
+        // even when the wildcard bucket merged a same-pattern rule into the resolution.
+        if (entryId.HasValue && entry.Id.HasValue)
+            return entry.Id.Value == entryId.Value;
+
+        if (!string.Equals(entry.Pattern?.Trim(), pattern.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Only narrow by argument binding when the caller knew one; otherwise preserve
+        // the historical behavior for callers that cannot supply it.
+        if (argPattern is null)
+            return true;
+
+        return string.Equals(entry.ArgPattern ?? "", argPattern, StringComparison.Ordinal);
     }
 
     // Side-effecting resolve: creates the file if missing, initializes agents dict.

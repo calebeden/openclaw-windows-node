@@ -46,6 +46,8 @@ internal static class ExecReusableCommandBinder
         ExecutableNotFound,
         ExecutableNotBindable,
         ExecutableOnNetworkPath,
+        ArgumentContainsNul,
+        CarrierPayloadExecutableAmbiguous,
     }
 
     internal static ExecReusableCommand? TryBind(
@@ -93,6 +95,17 @@ internal static class ExecReusableCommandBinder
                 return null;
             }
 
+            // The carrier is preserved verbatim for transport, so cmd.exe re-resolves the
+            // payload executable at launch and it searches the current directory before
+            // PATH. Our resolver never searches the current directory, so a cwd-local file
+            // of the same name means we would authorize one binary and run another. Refuse
+            // the durable binding rather than resolve it two different ways.
+            if (ExecCommandResolver.HasCurrentDirectoryCandidate(payloadArgv[0], cwd, env))
+            {
+                failure = BindFailure.CarrierPayloadExecutableAmbiguous;
+                return null;
+            }
+
             // Identity looks through the carrier; transport stays the original argv,
             // except that argv[0] is pinned to the resolved system cmd.exe so Windows
             // cannot re-resolve a bare "cmd.exe" against PATH at launch time.
@@ -131,6 +144,19 @@ internal static class ExecReusableCommandBinder
         {
             failure = BindFailure.EmptyCommand;
             return null;
+        }
+
+        // NUL is the argument separator in the persisted argPattern, so an argument
+        // containing one is ambiguous: "a\0b" renders identically to the two arguments
+        // "a","b" and would let a stored rule match a differently segmented argv. It is
+        // also not representable in a Windows command line, so rejecting is fail-closed.
+        for (var i = 0; i < argv.Count; i++)
+        {
+            if (argv[i].IndexOf('\0') >= 0)
+            {
+                failure = BindFailure.ArgumentContainsNul;
+                return null;
+            }
         }
 
         if (ExecEnvInvocationUnwrapper.AnyWrapperHasModifiers(argv))
@@ -303,6 +329,8 @@ internal static class ExecReusableCommandBinder
         BindFailure.ExecutableNotFound => "executable-not-found",
         BindFailure.ExecutableNotBindable => "executable-not-bindable",
         BindFailure.ExecutableOnNetworkPath => "executable-on-network-path",
+        BindFailure.ArgumentContainsNul => "argument-contains-nul",
+        BindFailure.CarrierPayloadExecutableAmbiguous => "carrier-payload-executable-ambiguous",
         _ => "unknown",
     };
 }

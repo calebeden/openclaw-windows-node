@@ -140,7 +140,8 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             catch (Exception ex) { _logger.Warn($"[EXEC-APPROVALS] [{correlationId}] side-effect: record-usage failed (non-fatal): {ex.Message}"); }
             _logger.Info($"[EXEC-APPROVALS] [{correlationId}] path=new " +
                 $"canonical=\"{SanitizeForLog(context.DisplayCommand)}\" decision=allow " +
-                $"reason=approved fallbackUsed=false promptAttempted=false");
+                $"reason=approved fallbackUsed=false promptAttempted=false " +
+                $"grant={DescribeGrantBreadth(context)}");
             return ExecApprovalV2Result.Allow(preApprovedExecution);
         }
         // RequiresPromptOutcome → continue to prompt/fallback block
@@ -498,6 +499,21 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         }
     }
 
+    // A path-only entry authorizes its executable regardless of arguments. That is a
+    // legitimate hand-written operator rule, but it is also what a pre-argPattern
+    // legacy entry degrades to, so a broad grant must never be indistinguishable from a
+    // precisely bound one in the log.
+    private static string DescribeGrantBreadth(ExecApprovalEvaluation context)
+    {
+        if (context.AllowlistMatches.Count == 0) return "none";
+        var anyPathOnly = false;
+        foreach (var match in context.AllowlistMatches)
+        {
+            if (string.IsNullOrEmpty(match.ArgPattern)) anyPathOnly = true;
+        }
+        return anyPathOnly ? "path-only" : "arg-bound";
+    }
+
     // Updates lastUsed* metadata for every matched allowlist entry after a final allow.
     // Guard mirrors macOS recordAllowlistMatches: no-op unless security=allowlist and satisfied.
     private async Task RecordAllowlistUsageAsync(ExecApprovalEvaluation context)
@@ -506,13 +522,22 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < context.AllowlistMatches.Count; i++)
         {
-            var pattern = context.AllowlistMatches[i].Pattern;
-            if (string.IsNullOrEmpty(pattern) || !seen.Add(pattern)) continue;
+            var match = context.AllowlistMatches[i];
+            var pattern = match.Pattern;
+            if (string.IsNullOrEmpty(pattern)) continue;
+            // Entries sharing a pattern are distinguished by their argument binding, so
+            // the dedupe key must include it or a second binding would be skipped.
+            if (!seen.Add($"{match.Id}\u0000{pattern}\u0000{match.ArgPattern}")) continue;
             var resolvedPath = i < context.AllowlistResolutions.Count
                 ? context.AllowlistResolutions[i].ResolvedPath
                 : null;
             await _store.RecordAllowlistUseAsync(
-                context.AgentId, pattern, resolvedPath, context.DisplayCommand)
+                context.AgentId,
+                pattern,
+                resolvedPath,
+                context.DisplayCommand,
+                match.Id,
+                match.ArgPattern)
                 .ConfigureAwait(false);
         }
     }
