@@ -410,8 +410,7 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             || !Path.IsPathFullyQualified(resolvedPath)
             || !File.Exists(resolvedPath)
             || ExecCommandToken.IsIndirectCommandHost(resolvedPath)
-            || resolvedPath.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
-            || resolvedPath.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+            || !ExecReusableCommandBinder.IsBindableExecutable(resolvedPath))
         {
             return null;
         }
@@ -501,7 +500,11 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
                 && context.Ask != ExecAsk.Always
                 && identity.ReusableCommand is not null,
             AgentId = context.AgentId ?? "main",
-            ResolvedPath = ExecApprovalPathDisplay.ExpandShortPath(context.Resolution?.ResolvedPath),
+            // context.Resolution is the durably bindable command and is null whenever
+            // nothing binds. Fall back to the carrier's own resolution so the operator
+            // is never asked to approve a command with no resolved executable shown.
+            ResolvedPath = ExecApprovalPathDisplay.ExpandShortPath(
+                context.Resolution?.ResolvedPath ?? identity.Resolution?.ResolvedPath),
             SessionKey = identity.SessionKey,
             CorrelationId = correlationId,
             // Host omitted (no gateway wiring yet)

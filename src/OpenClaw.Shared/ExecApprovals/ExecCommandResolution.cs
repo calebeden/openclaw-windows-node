@@ -14,10 +14,18 @@ public readonly record struct ExecCommandResolution(
     string ExecutableName,
     string? Cwd);
 
-// The three resolution functions required by the pipeline.
+// The resolution functions.
 // resolve()               → singular, for state machine
-// ResolveForAllowlist()   → multi-segment, fail-closed, for allowlist matching
-// ResolveAllowAlwaysPatterns() → UX suggestions for prompt
+//
+// ResolveForAllowlist() and ResolveAllowAlwaysPatterns() are NO LONGER on the
+// security path. Durable allowlist authorization and Allow Always patterns are now
+// derived solely by ExecReusableCommandBinder.TryBind, which is the single gate.
+// These two methods have no production callers and are retained only because the
+// historical test suite in ExecApprovalV2NormalizationTests documents the
+// multi-segment fail-closed rules they encoded. Do not wire them back into the
+// pipeline: passing them does not mean the allowlist path is safe, because the
+// pipeline no longer calls them. Removing them and their tests is tracked as
+// follow-up cleanup.
 internal static class ExecCommandResolver
 {
     // Windows executable extensions, tried in order for basename search.

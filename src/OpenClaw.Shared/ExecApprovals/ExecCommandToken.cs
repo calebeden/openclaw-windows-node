@@ -35,9 +35,19 @@ internal static class ExecCommandToken
     // language. The V2 store authorizes executable paths rather than exact argv, so
     // later invocations could execute different content without another approval.
     //
-    // This catalog is a maintained security boundary, matching the macOS binding
-    // model. When Windows adds a code-host binary, or this product supports a new
-    // runtime, add it here before allowing durable executable-level approval.
+    // This catalog is a maintained security boundary. It is NOT the macOS model:
+    // macOS binds a durable entry to an executable plus an argPattern, so a wrapper
+    // can be approved against a specific argument form instead of being refused.
+    // Until the Windows policy schema carries an argument constraint, this catalog
+    // is what stands in for that binding, so it must be kept current.
+    //
+    // Known limitation: matching is by basename, so a renamed copy of a code host
+    // (for example powershell.exe copied to ps.exe) is not recognized. Treat this
+    // as defense in depth against accidental over-approval, not as a control that
+    // withstands a deliberately renamed binary.
+    //
+    // When Windows adds a code-host binary, or this product supports a new runtime,
+    // add it here before allowing durable executable-level approval.
     private static readonly System.Collections.Generic.HashSet<string> s_indirectCommandHosts =
         new(StringComparer.Ordinal)
         {
@@ -50,6 +60,14 @@ internal static class ExecCommandToken
             "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
             "r", "rscript", "tclsh", "wish", "groovy",
             "mshta", "regsvr32", "rundll32",
+            // Windows binaries that compile, load, or proxy execution of
+            // argument-selected code. Allow-once still works for these; only
+            // durable executable-level approval is withheld.
+            "msbuild", "csc", "vbc", "dnx", "rcsi",
+            "installutil", "regasm", "regsvcs", "mavinject",
+            "msiexec", "certutil", "bitsadmin", "wmic",
+            "forfiles", "scriptrunner", "pcalua", "cmstp", "odbcconf",
+            "msdt", "ieexec", "presentationhost", "winrs", "hh", "msxsl", "xwizard",
         };
 
     internal static bool IsIndirectCommandHost(string token)

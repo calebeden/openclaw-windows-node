@@ -220,8 +220,186 @@ public class ExecReusableCommandBinderTests
         Assert.Equal("hello", bound!.Argv[1]);
     }
 
-    private static string FindTestHostExecutable()
+    // ── Multi-element carrier tails ───────────────────────────────────────────
+    // Upstream approval fixtures send the command text already tokenized across
+    // several argv elements, for example
+    // ["cmd.exe","/d","/s","/c","echo","SAFE&&whoami"]. A binder that only accepts
+    // a single pre-joined tail element silently refuses those, which is exactly the
+    // allowlist failure this work is meant to fix.
+
+    [Fact]
+    public void MultiElementCarrierTail_Binds()
     {
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "where.exe", "hello"],
+            cwd: null,
+            env: null);
+
+        Assert.NotNull(bound);
+        Assert.EndsWith("where.exe", bound!.Argv[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("hello", bound.Argv[1]);
+    }
+
+    [Fact]
+    public void MultiElementCarrierTail_WithShellOperator_DoesNotBind()
+    {
+        // The upstream fixture shape. It must stay unbindable: the payload is a
+        // compound command, and `echo` is a cmd builtin.
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "echo", "SAFE&&whoami"],
+            cwd: null,
+            env: null);
+
+        Assert.Null(bound);
+    }
+
+    [Theory]
+    [InlineData("hello world")]
+    [InlineData("hello\tworld")]
+    [InlineData("\"hello\"")]
+    public void MultiElementCarrierTail_NonReconstructibleElement_DoesNotBind(string trailing)
+    {
+        // A space join cannot recover the original process-creation quoting, so the
+        // binder must refuse rather than authorize a different command than the one
+        // cmd.exe would run.
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "where.exe", trailing],
+            cwd: null,
+            env: null);
+
+        Assert.Null(bound);
+    }
+
+    [Fact]
+    public void AbsolutePathCmdCarrier_Binds()
+    {
+        var cmdPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+        Assert.True(File.Exists(cmdPath));
+
+        var bound = ExecReusableCommandBinder.TryBind(
+            [cmdPath, "/d", "/s", "/c", "hostname.exe"],
+            cwd: null,
+            env: null);
+
+        Assert.NotNull(bound);
+        Assert.EndsWith("hostname.exe", bound!.Argv[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AcceptedMultiElementTail_MatchesRealCmdChildArgv()
+    {
+        var host = FindTestHostExecutable();
+        string[] carrier = ["cmd.exe", "/d", "/s", "/c", host, "--echo-args", "alpha", "beta"];
+        var bound = ExecReusableCommandBinder.TryBind(carrier, cwd: null, env: null);
+
+        Assert.NotNull(bound);
+        var throughCmd = await RunAndReadArgsAsync("cmd.exe", carrier.Skip(1).ToArray());
+        var direct = await RunAndReadArgsAsync(bound!.Argv[0], bound.Argv.Skip(1).ToArray());
+
+        Assert.Equal(["alpha", "beta"], throughCmd);
+        Assert.Equal(throughCmd, direct);
+    }
+
+    // ── cmd delimiters the tokenizer does not model ───────────────────────────
+    // cmd also delimits the command-name token on ',', ';' and '='. The binder
+    // splits only on space and tab, so these must fail closed (bind nothing) rather
+    // than bind a token that differs from what cmd would execute.
+
+    [Theory]
+    [InlineData("where.exe,hello")]
+    [InlineData("where.exe;hello")]
+    [InlineData("where.exe=hello")]
+    public void UnmodeledCmdDelimiter_FailsClosed(string payload)
+        => Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", payload],
+            cwd: null,
+            env: null));
+
+    // ── PATHEXT targets that are not PE executables ───────────────────────────
+
+    [Theory]
+    [InlineData(".js")]
+    [InlineData(".vbs")]
+    [InlineData(".wsf")]
+    [InlineData(".msc")]
+    [InlineData(".com")]
+    [InlineData(".bat")]
+    [InlineData(".cmd")]
+    public void NonExecutableExtensionTarget_DoesNotBind(string extension)
+    {
+        var directory = Directory.CreateTempSubdirectory("openclaw-binder-ext");
+        try
+        {
+            var target = Path.Combine(directory.FullName, "probe" + extension);
+            File.WriteAllText(target, "rem placeholder");
+
+            Assert.Null(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ExecutableExtensionTarget_Binds()
+    {
+        // Control for NonExecutableExtensionTarget_DoesNotBind: the same shape with
+        // a .exe target must still bind, so the extension gate is what rejects.
+        var directory = Directory.CreateTempSubdirectory("openclaw-binder-ext");
+        try
+        {
+            var target = Path.Combine(directory.FullName, "probe.exe");
+            File.Copy(FindTestHostExecutable(), target);
+
+            var bound = ExecReusableCommandBinder.TryBind([target], cwd: null, env: null);
+
+            Assert.NotNull(bound);
+            Assert.EndsWith("probe.exe", bound!.Argv[0], StringComparison.OrdinalIgnoreCase);
+            Assert.True(Path.IsPathFullyQualified(bound.Argv[0]));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    // ── Expanded indirect code-host catalog ───────────────────────────────────
+
+    [Theory]
+    [InlineData("msbuild.exe")]
+    [InlineData("installutil.exe")]
+    [InlineData("regasm.exe")]
+    [InlineData("regsvcs.exe")]
+    [InlineData("msiexec.exe")]
+    [InlineData("certutil.exe")]
+    [InlineData("bitsadmin.exe")]
+    [InlineData("wmic.exe")]
+    [InlineData("forfiles.exe")]
+    [InlineData("scriptrunner.exe")]
+    [InlineData("pcalua.exe")]
+    [InlineData("cmstp.exe")]
+    [InlineData("odbcconf.exe")]
+    [InlineData("presentationhost.exe")]
+    [InlineData("msxsl.exe")]
+    [InlineData("xwizard.exe")]
+    [InlineData("hh.exe")]
+    [InlineData("mavinject.exe")]
+    [InlineData("csc.exe")]
+    [InlineData("vbc.exe")]
+    public void ExpandedWindowsCodeHost_IsNotDurablyBindable(string host)
+    {
+        // These select the code they run from their arguments, so a durable rule on
+        // the executable path alone does not constrain what later runs. Verified at
+        // the classification layer because most are not present on every host.
+        Assert.True(
+            ExecCommandToken.IsIndirectCommandHost(host),
+            $"{host} must be treated as an indirect command host.");
+    }
+
+    private static string FindTestHostExecutable()    {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         while (current is not null
             && !Directory.Exists(Path.Combine(current.FullName, "tests")))

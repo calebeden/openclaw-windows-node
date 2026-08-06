@@ -502,6 +502,17 @@ public class SystemCapability : NodeCapabilityBase
         }
     }
 
+    // Wire shape for exec.approvals.node.get.
+    //
+    // This is the file-backed variant of the gateway's ExecApprovalsNodeSnapshotSchema.
+    // That schema is a closed object (additionalProperties: false) whose file-backed
+    // oneOf branch requires exactly [path, exists, hash, file] AND explicitly carries
+    // not: { anyOf: [ ... { required: ["baseHash"] } ... ] }. Emitting baseHash here
+    // therefore matches no branch and the gateway rejects the whole snapshot.
+    //
+    // baseHash is a REQUEST field, not a response field: a client reads `hash` from
+    // this payload and passes it back as `baseHash` on set for compare-and-swap. Do
+    // not add baseHash to this payload. Tests assert its absence for that reason.
     private static object ToExecApprovalsPayload(ExecApprovalsSnapshot snapshot)
     {
         var file = snapshot.File;

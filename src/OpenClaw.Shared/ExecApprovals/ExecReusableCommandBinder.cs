@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using OpenClaw.Shared.Commands;
 
 namespace OpenClaw.Shared.ExecApprovals;
 
@@ -25,7 +26,7 @@ internal static class ExecReusableCommandBinder
         if (command.Count == 0)
             return null;
 
-        if (TryGetCanonicalCmdPayload(command, out var payload))
+        if (CanonicalCmdCarrier.TryGetCanonicalPayload(command, out var payload))
         {
             if (!TryTokenizeStaticCmdPayload(payload, out var payloadArgv))
                 return null;
@@ -69,7 +70,7 @@ internal static class ExecReusableCommandBinder
             || string.IsNullOrWhiteSpace(resolvedPath)
             || !Path.IsPathFullyQualified(resolvedPath)
             || !File.Exists(resolvedPath)
-            || IsBatchFile(resolvedPath)
+            || !IsBindableExecutable(resolvedPath)
             || ExecCommandToken.IsIndirectCommandHost(resolvedPath))
         {
             return null;
@@ -80,25 +81,6 @@ internal static class ExecReusableCommandBinder
         for (var i = 1; i < effectiveArgv.Count; i++)
             boundArgv[i] = effectiveArgv[i];
         return new ExecReusableCommand(boundArgv, resolution.Value);
-    }
-
-    private static bool TryGetCanonicalCmdPayload(
-        IReadOnlyList<string> command,
-        out string payload)
-    {
-        payload = "";
-        if (command.Count != 5
-            || (!string.Equals(command[0], "cmd", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(command[0], "cmd.exe", StringComparison.OrdinalIgnoreCase))
-            || !string.Equals(command[1], "/d", StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(command[2], "/s", StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(command[3], "/c", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        payload = command[4];
-        return true;
     }
 
     internal static bool TryTokenizeStaticCmdPayload(
@@ -154,10 +136,18 @@ internal static class ExecReusableCommandBinder
 
     private static bool IsCmdWhitespace(char ch) => ch is ' ' or '\t';
 
-    private static bool IsBatchFile(string path)
+    /// <summary>
+    /// Durable binding is restricted to real PE executables.
+    ///
+    /// PATH resolution probes every PATHEXT entry, which by default also includes
+    /// .COM, .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all
+    /// interpreted content whose meaning can change without any change to the path
+    /// that was approved, so an allowlist of extensions is used here rather than a
+    /// denylist of the two batch extensions.
+    /// </summary>
+    internal static bool IsBindableExecutable(string path)
     {
         var extension = Path.GetExtension(path);
-        return extension.Equals(".bat", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase);
+        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase);
     }
 }

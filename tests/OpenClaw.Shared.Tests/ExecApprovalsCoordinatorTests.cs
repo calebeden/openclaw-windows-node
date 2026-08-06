@@ -1234,6 +1234,93 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         Assert.Equal(["hello"], result.Execution.Argv.Skip(1).ToArray());
     }
 
+    // Regression: an unbindable command must still show the operator a resolved
+    // executable path. context.Resolution is the durably bindable command and is
+    // null whenever nothing binds, so the prompt falls back to the carrier's own
+    // resolution rather than asking for approval with no path displayed.
+    [Fact]
+    public async Task Prompt_UnbindableShellCommand_StillShowsResolvedPath()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
+        var prompt = new CapturingPromptHandler(ExecApprovalPromptOutcome.Deny);
+
+        await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: prompt)
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe | findstr.exe host"]}"""),
+                "unbindable-resolved-path");
+
+        Assert.NotNull(prompt.Captured);
+        Assert.False(prompt.Captured!.AllowAlwaysAvailable);
+        Assert.False(string.IsNullOrWhiteSpace(prompt.Captured.ResolvedPath));
+        Assert.EndsWith(
+            "cmd.exe",
+            prompt.Captured.ResolvedPath!,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The gateway forwards command text already tokenized across several argv
+    // elements. A binder that only accepts a single pre-joined tail element leaves
+    // the allowlist broken for exactly those requests.
+    [Fact]
+    public async Task StoredWhereRule_MultiElementCarrierTail_ExecutesBoundDirectArgv()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/where.exe"}]}}}""");
+
+        var result = await MakeCoordinator().HandleAsync(
+            Req("""{"command":["cmd.exe","/d","/s","/c","where.exe","hello"]}"""),
+            "bound-multi-element-tail");
+
+        Assert.True(result.IsAllow);
+        Assert.EndsWith("where.exe", result.Execution!.Argv[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(["hello"], result.Execution.Argv.Skip(1).ToArray());
+    }
+
+    [Fact]
+    public async Task AbsolutePathCmdCarrier_StoredRule_ExecutesBoundDirectArgv()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""");
+        var cmdPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+
+        var result = await MakeCoordinator().HandleAsync(
+            Req(JsonSerializer.Serialize(new
+            {
+                command = new[] { cmdPath, "/d", "/s", "/c", "hostname.exe" }
+            })),
+            "bound-absolute-cmd");
+
+        Assert.True(result.IsAllow);
+        Assert.Single(result.Execution!.Argv);
+        Assert.EndsWith("hostname.exe", result.Execution.Argv[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    // A prompt handler that reports AllowAlways under security=full must not widen
+    // durable policy. Nothing persists under full, so the decision degrades to a
+    // one-time allow rather than writing an allowlist entry the policy never had.
+    [Fact]
+    public async Task AllowAlways_UnderSecurityFull_PersistsNothing()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"full","ask":"on-miss"}}""");
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowAlways))
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+                "allow-always-full");
+
+        Assert.True(result.IsAllow);
+        var resolved = new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main");
+        Assert.Empty(resolved.Allowlist);
+    }
+
     [Fact]
     public void V2Result_IsAllow_FalseForAllDenyCodes()
     {

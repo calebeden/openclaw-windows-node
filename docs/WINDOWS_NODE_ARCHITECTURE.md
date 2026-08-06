@@ -502,12 +502,25 @@ keeps approval identity and process execution on one argv representation.
 #### Decision: bind reusable gateway commands to direct argv
 
 The gateway represents Windows shell text as
-`["cmd.exe", "/d", "/s", "/c", "<command>"]`. V2 may persist or consume an
+`["cmd.exe", "/d", "/s", "/c", "<command>"]`. The command tail may arrive as a
+single pre-joined element or already tokenized across several argv elements, and
+the carrier executable may be either the bare name or a fully qualified path.
+`CanonicalCmdCarrier` is the single owner of that recognition, shared by the
+approvals binder and the MXC command-line builder so the layer that authorizes a
+shape and the layer that runs it cannot disagree. A multi-element tail is only
+accepted when every element is free of whitespace and quotes, because otherwise
+the original process-creation quoting is not recoverable by a space join.
+
+V2 may persist or consume an
 allowlist rule only when that carrier contains one statically bindable external
 command. The binder accepts an intentionally small grammar: unquoted literal
 tokens separated by whitespace. It rejects quoting, pipelines, command chains,
-redirection, expansion, caret escapes, grouping, CMD built-ins, batch files,
-unresolved or nonexistent executables, and interpreter/command-host targets.
+redirection, expansion, caret escapes, grouping, CMD built-ins, unresolved or
+nonexistent executables, and interpreter/command-host targets. Durable binding is
+further restricted to `.exe` targets: PATH resolution probes every `PATHEXT`
+entry, so a bare name can otherwise resolve to `.bat`, `.cmd`, `.com`, `.vbs`,
+`.js`, `.wsf`, or `.msc` content whose meaning can change without any change to
+the approved path.
 
 For a successful binding, one immutable reusable command supplies the resolved
 path used for matching, the persisted pattern, usage metadata, and the direct
@@ -521,15 +534,46 @@ without prompting. A manually configured literal `ask: "always"` still prompts
 every time. Allow always is offered only for a reusable command under allowlist
 security and persists that command's resolved executable path.
 
+When nothing binds, the prompt still shows the operator a resolved executable
+path, falling back to the carrier's own resolution. An approval dialog must never
+ask for a decision with no resolved path displayed.
+
 The executable-level store cannot constrain future arguments. Windows
 interpreters and argument-selected code hosts (for example `mshta.exe`,
-`regsvr32.exe`, and `rundll32.exe`) are therefore maintained in
-`ExecCommandToken.IsIndirectCommandHost` and stay one-time, matching the macOS
-binding model. This catalog is intentionally an explicit security maintenance
-surface: new Windows code-host binaries and newly supported runtimes must be
-classified there before they can receive durable approval. Exact-argv
-allowlisting would remove this catalog dependency, but requires a future policy
-schema and UX change.
+`regsvr32.exe`, `rundll32.exe`, `msbuild.exe`, `installutil.exe`, `certutil.exe`,
+and `wmic.exe`) are therefore maintained in
+`ExecCommandToken.IsIndirectCommandHost` and stay one-time. This catalog is
+intentionally an explicit security maintenance surface: new Windows code-host
+binaries and newly supported runtimes must be classified there before they can
+receive durable approval.
+
+This is **not** the macOS binding model, and the difference is deliberate but
+temporary. macOS persists an `argPattern` alongside the executable, so a wrapper
+or interpreter can receive durable approval bound to a specific argument form
+rather than being refused outright. The Windows V2 store has no argument
+constraint, so the catalog is what stands in for that binding. Two consequences
+follow, and both are accepted limitations rather than oversights:
+
+- The catalog is matched by basename, so a renamed copy of a code host is not
+  recognized. Treat it as defense in depth against accidental over-approval, not
+  as a control that withstands a deliberately renamed binary.
+- The catalog can never be provably complete. Adding an `argPattern` to the
+  Windows allowlist entry schema would remove the dependency on it entirely and
+  reach macOS parity, but requires a policy schema and Allow always UX change.
+
+##### Behavior changes from executable-path-only binding
+
+- A stored rule naming an interpreter or code host (for example
+  `**/wsl.exe`) previously produced a hard
+  `persistent-approval-not-permitted-for-command-host` refusal. It now produces a
+  normal allowlist miss, so under `ask: "on-miss"` the operator is prompted and
+  may Allow once. This is a deliberate loosening: the previous behavior denied
+  even attended one-time approval.
+- A separator-bearing path to a nonexistent file is now rejected at bind time.
+  Binding requires the resolved executable to exist.
+- Integrity binding is by resolved path only, with no content hash, inode, or
+  signature check. This matches macOS `lastResolvedPath` behavior, and leaves the
+  same time-of-check to time-of-use exposure between approval and launch.
 
 ### Location → Windows.Devices.Geolocation
 
