@@ -63,7 +63,12 @@ public class ExecReusableCommandBinderTests
         Assert.NotNull(bound);
         Assert.True(bound!.IsCarrierTransport);
         Assert.EndsWith("hostname.exe", bound.Argv[0], StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(command, bound.ExecutionArgv.ToArray());
+
+        // argv[0] is pinned to the resolved system cmd.exe so Windows cannot
+        // re-resolve the bare name at launch; everything after it is verbatim.
+        Assert.True(Path.IsPathFullyQualified(bound.ExecutionArgv[0]));
+        Assert.EndsWith("cmd.exe", bound.ExecutionArgv[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(command.AsSpan(1).ToArray(), bound.ExecutionArgv.Skip(1).ToArray());
     }
 
     [Fact]

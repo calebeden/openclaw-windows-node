@@ -87,6 +87,37 @@ internal static class CanonicalCmdCarrier
     }
 
     /// <summary>
+    /// The absolute path a trusted carrier token must launch, or null when the token
+    /// is not a trusted carrier.
+    ///
+    /// The canonical carrier arrives as a bare name, but a launched executable has to
+    /// be fully qualified: leaving argv[0] relative would let Windows re-resolve it
+    /// against PATH or the working directory at launch time, which is exactly the
+    /// hijack the resolved-path rule exists to prevent. Pinning argv[0] here is not a
+    /// rewrite of the command, it is the same identity spelled unambiguously.
+    /// </summary>
+    internal static string? ResolveTrustedCarrierPath(string? executable)
+    {
+        if (!IsTrustedCarrierExecutable(executable))
+            return null;
+
+        var trimmed = executable!.Trim();
+        if (Path.IsPathFullyQualified(trimmed))
+            return File.Exists(trimmed) ? Path.GetFullPath(trimmed) : null;
+
+        foreach (var systemDirectory in SystemDirectories())
+        {
+            if (string.IsNullOrEmpty(systemDirectory))
+                continue;
+            var candidate = Path.Combine(systemDirectory, "cmd.exe");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Recognizes <c>cmd[.exe] /d /s /c &lt;tail...&gt;</c> and reconstructs the single
     /// command-line string cmd.exe receives.
     ///

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenClaw.Shared;
+using OpenClaw.Shared.Commands;
 
 namespace OpenClaw.Shared.ExecApprovals;
 
@@ -450,16 +451,26 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         };
     }
 
-    // The carrier that runs must be exactly the argv that was validated and evaluated.
-    // Anything else means a rewritten command line reached execution, which is the one
-    // way metacharacter drift could be introduced between approval and launch.
+    // The carrier that runs must be the argv that was validated and evaluated, with a
+    // single permitted difference: argv[0] may be the resolved absolute path of the
+    // same trusted system cmd.exe the request named. Every other element must be
+    // identical, because a rewritten command line is the one way metacharacter drift
+    // could be introduced between approval and launch.
     internal static bool CarrierTransportMatchesRequest(
         IReadOnlyList<string> executionArgv,
         IReadOnlyList<string> requestArgv)
     {
-        if (executionArgv.Count != requestArgv.Count)
+        if (executionArgv.Count != requestArgv.Count || executionArgv.Count == 0)
             return false;
-        for (var i = 0; i < executionArgv.Count; i++)
+
+        var requestCarrier = CanonicalCmdCarrier.ResolveTrustedCarrierPath(requestArgv[0]);
+        if (requestCarrier is null
+            || !string.Equals(executionArgv[0], requestCarrier, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        for (var i = 1; i < executionArgv.Count; i++)
         {
             if (!string.Equals(executionArgv[i], requestArgv[i], StringComparison.Ordinal))
                 return false;

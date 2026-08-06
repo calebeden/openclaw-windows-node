@@ -93,8 +93,21 @@ internal static class ExecReusableCommandBinder
                 return null;
             }
 
-            // Identity looks through the carrier; transport stays the original argv.
-            return BindDirect(payloadArgv, cwd, env, command, out failure);
+            // Identity looks through the carrier; transport stays the original argv,
+            // except that argv[0] is pinned to the resolved system cmd.exe so Windows
+            // cannot re-resolve a bare "cmd.exe" against PATH at launch time.
+            var carrierPath = CanonicalCmdCarrier.ResolveTrustedCarrierPath(command[0]);
+            if (carrierPath is null)
+            {
+                failure = BindFailure.UntrustedCarrierImage;
+                return null;
+            }
+            var executionArgv = new string[command.Count];
+            executionArgv[0] = carrierPath;
+            for (var i = 1; i < command.Count; i++)
+                executionArgv[i] = command[i];
+
+            return BindDirect(payloadArgv, cwd, env, executionArgv, out failure);
         }
 
         if (ExecShellWrapperNormalizer.Extract(command).IsWrapper)

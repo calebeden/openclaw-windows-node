@@ -21,6 +21,12 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     private readonly string _dir;
     private readonly ITestOutputHelper _output;
 
+    // The carrier is preserved for execution, but argv[0] is pinned to the resolved
+    // system image so Windows cannot re-resolve a bare "cmd.exe" at launch time.
+    private static string SystemCmdPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.System),
+        "cmd.exe");
+
     public ExecApprovalsCoordinatorTests(ITestOutputHelper output)
     {
         _dir = Path.Combine(Path.GetTempPath(), $"oca-coord-test-{Guid.NewGuid():N}");
@@ -1113,7 +1119,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         // The executed command is byte-for-byte the request. Any rewriting here would
         // be an opportunity for the executed command to drift from the approved one.
         Assert.Equal(
-            ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+            [SystemCmdPath, "/d", "/s", "/c", "hostname.exe"],
             result.Execution!.Argv.ToArray());
     }
 
@@ -1132,7 +1138,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+            [SystemCmdPath, "/d", "/s", "/c", "hostname.exe"],
             result.Execution!.Argv.ToArray());
 
         // The stored rule describes the inner executable, not the carrier, so a later
@@ -1251,7 +1257,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            ["cmd.exe", "/d", "/s", "/c", "where.exe\thello"],
+            [SystemCmdPath, "/d", "/s", "/c", "where.exe\thello"],
             result.Execution!.Argv.ToArray());
     }
 
@@ -1297,7 +1303,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            ["cmd.exe", "/d", "/s", "/c", "where.exe", "hello"],
+            [SystemCmdPath, "/d", "/s", "/c", "where.exe", "hello"],
             result.Execution!.Argv.ToArray());
     }
 

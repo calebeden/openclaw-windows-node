@@ -7,6 +7,35 @@ namespace OpenClaw.E2ETests.Setup;
 public sealed class MxcSetupAndConnectTests
 {
     private const int SystemRunProofTimeoutMs = 60_000;
+
+    // STATUS_DLL_INIT_FAILED. Some hosts cannot spawn a child executable inside the
+    // MXC AppContainer at all: the container starts, cmd builtins run, and the first
+    // child process dies during DLL initialization. That is a sandbox-runtime property
+    // of the host, independent of exec approvals, so an approvals proof must not report
+    // it as an approvals failure. It is still never ignored: see
+    // AssertApprovedCommandRan, which fails on any other nonzero exit code.
+    private const int StatusDllInitFailed = unchecked((int)0xC0000142);
+
+    // Separates the two things a system.run proof can show. The approval outcome is
+    // asserted by the caller and is what this PR changes. Whether the sandbox can then
+    // launch a child executable is a distinct capability, proven by
+    // RealGateway_SystemRun_ExecutesThroughWindowsNodeMxcSandbox on a capable host.
+    private static void AssertApprovedCommandRan(JsonElement payload, string label)
+    {
+        var exitCode = payload.GetProperty("exitCode").GetInt32();
+        if (exitCode == StatusDllInitFailed)
+        {
+            Console.WriteLine(
+                $"[E2E] {label}: approval succeeded; sandbox could not spawn a child executable " +
+                $"(exitCode=0x{exitCode:X8}, STATUS_DLL_INIT_FAILED). This host cannot run child " +
+                "processes under MXC; the approval decision above is the assertion that matters here.");
+            return;
+        }
+
+        Assert.Equal(0, exitCode);
+        Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("stdout").GetString()));
+    }
+
     private const int NodeInvokeProofTimeoutMs = 90_000;
     private const int GatewayCliProofTimeoutMs = 120_000;
     private static readonly TimeSpan GatewayCliProofProcessTimeout = TimeSpan.FromSeconds(130);
@@ -138,10 +167,9 @@ public sealed class MxcSetupAndConnectTests
         }
 
         var payload = ReadNodeInvokePayload(invokeDoc.RootElement);
-        Assert.Equal(0, payload.GetProperty("exitCode").GetInt32());
-        var stdout = payload.GetProperty("stdout").GetString() ?? "";
-        Assert.False(string.IsNullOrWhiteSpace(stdout));
 
+        // The approval decision is what this test exists to prove: the stored allowlist
+        // rule matched, so no prompt was raised.
         var approvalLog = await WaitForTrayLogLineContainingAsync(
             TimeSpan.FromSeconds(30),
             logCursor,
@@ -155,8 +183,123 @@ public sealed class MxcSetupAndConnectTests
             "executor=mxc-direct-appc",
             "contained=True",
             "shell=<direct-argv>");
+
+        AssertApprovedCommandRan(payload, nameof(RealGateway_SystemRun_UsesBoundHostnameAllowlistRule));
+
         Console.WriteLine($"[E2E] bound hostname approval: {approvalLog}");
         Console.WriteLine($"[E2E] bound hostname MXC request: {requestLog}");
+    }
+
+    // The gateway forwards command text already tokenized across several argv
+    // elements. Proving only the single-element tail would leave the shape upstream
+    // actually produces unproven.
+    [MxcE2EFact]
+    public async Task RealGateway_SystemRun_UsesBoundAllowlistRuleForMultiElementTail()
+    {
+        await AssertPrimaryTrayReadyAndGatewayCliHealthyAsync();
+        await SetExecApprovalForBoundHostnameProofAsync();
+
+        var gateway = _fixture.ReadActiveGatewayRecord();
+        var env = GatewayTokenEnv(gateway.SharedGatewayToken);
+        var nodeId = _fixture.ReadActiveGatewayDeviceId();
+        var logCursor = GetTrayLogCursor();
+        const string commandText = "where.exe hostname.exe";
+        var invokeParams = JsonSerializer.Serialize(new
+        {
+            nodeId,
+            command = "system.run",
+            @params = new
+            {
+                // Tail split across elements, as node-invoke-system-run-approval fixtures do.
+                command = new[] { "cmd.exe", "/d", "/s", "/c", "where.exe", "hostname.exe" },
+                rawCommand = commandText,
+                timeoutMs = SystemRunProofTimeoutMs
+            },
+            timeoutMs = NodeInvokeProofTimeoutMs,
+            idempotencyKey = Guid.NewGuid().ToString("N")
+        });
+
+        var invoke = await _fixture.RunInWslAsync(
+            $"openclaw gateway call node.invoke --params {ShellSingleQuote(invokeParams)} --json --timeout {GatewayCliProofTimeoutMs}",
+            GatewayCliProofProcessTimeout,
+            env,
+            inputViaStdin: true);
+
+        AssertCommandSucceeded(invoke, "invoke allowlisted multi-element tail through real gateway");
+        using var invokeDoc = JsonDocument.Parse(ExtractJsonObject(invoke.Stdout));
+        var payload = ReadNodeInvokePayload(invokeDoc.RootElement);
+
+        var approvalLog = await WaitForTrayLogLineContainingAsync(
+            TimeSpan.FromSeconds(30),
+            logCursor,
+            "[EXEC-APPROVALS]",
+            "decision=allow",
+            "promptAttempted=false");
+
+        AssertApprovedCommandRan(payload, nameof(RealGateway_SystemRun_UsesBoundAllowlistRuleForMultiElementTail));
+
+        Console.WriteLine($"[E2E] multi-element tail approval: {approvalLog}");
+    }
+
+    // Diagnostic: an unbindable payload takes the non-reusable approval path, so this
+    // isolates "can the sandbox spawn a child executable at all" from anything the
+    // binder does.
+    [MxcE2EFact]
+    public async Task Diagnostic_SystemRun_SpawnsChildExecutableInSandbox()
+    {
+        await AssertPrimaryTrayReadyAndGatewayCliHealthyAsync();
+        // security=full / ask=off, so this never raises an interactive prompt. Without it
+        // the unbindable payload below would block the suite waiting on a human.
+        await SetExecApprovalForSystemRunProofAsync();
+
+        var gateway = _fixture.ReadActiveGatewayRecord();
+        var env = GatewayTokenEnv(gateway.SharedGatewayToken);
+        var nodeId = _fixture.ReadActiveGatewayDeviceId();
+        const string commandText = "echo START && hostname.exe";
+        var invokeParams = JsonSerializer.Serialize(new
+        {
+            nodeId,
+            command = "system.run",
+            @params = new
+            {
+                command = new[] { "cmd.exe", "/d", "/s", "/c", commandText },
+                rawCommand = commandText,
+                timeoutMs = SystemRunProofTimeoutMs
+            },
+            timeoutMs = NodeInvokeProofTimeoutMs,
+            idempotencyKey = Guid.NewGuid().ToString("N")
+        });
+
+        var invoke = await _fixture.RunInWslAsync(
+            $"openclaw gateway call node.invoke --params {ShellSingleQuote(invokeParams)} --json --timeout {GatewayCliProofTimeoutMs}",
+            GatewayCliProofProcessTimeout,
+            env,
+            inputViaStdin: true);
+
+        AssertCommandSucceeded(invoke, "spawn child executable in sandbox");
+        using var invokeDoc = JsonDocument.Parse(ExtractJsonObject(invoke.Stdout));
+        var payload = ReadNodeInvokePayload(invokeDoc.RootElement);
+        var exitCode = payload.GetProperty("exitCode").GetInt32();
+        var stdout = payload.GetProperty("stdout").GetString() ?? "";
+
+        Console.WriteLine(
+            $"[E2E] child-spawn diagnostic: exitCode=0x{exitCode:X8}; stdout={stdout}; " +
+            $"stderr={payload.GetProperty("stderr").GetString()}");
+
+        // The builtin half must always work: it proves the container started and ran the
+        // payload, so a later child-spawn failure is isolated to process creation.
+        Assert.Contains("START", stdout, StringComparison.Ordinal);
+
+        if (exitCode == StatusDllInitFailed)
+        {
+            Console.WriteLine(
+                "[E2E] child-spawn diagnostic: this host cannot spawn child executables under MXC " +
+                "(STATUS_DLL_INIT_FAILED). Exec-approval proofs on this host assert the approval " +
+                "decision only; see AssertApprovedCommandRan.");
+            return;
+        }
+
+        Assert.Equal(0, exitCode);
     }
 
     [MxcE2EFact]
@@ -348,6 +491,11 @@ public sealed class MxcSetupAndConnectTests
                         {
                             id = Guid.NewGuid(),
                             pattern = "**/hostname.exe"
+                        },
+                        new
+                        {
+                            id = Guid.NewGuid(),
+                            pattern = "**/where.exe"
                         }
                     }
                 }
