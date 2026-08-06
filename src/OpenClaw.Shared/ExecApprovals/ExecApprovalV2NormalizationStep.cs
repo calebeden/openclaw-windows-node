@@ -49,14 +49,14 @@ public static class ExecApprovalV2Normalizer
         // Singular resolution for state machine.
         var resolution = ExecCommandResolver.Resolve(argv, cwd, env);
 
-        // Multi-segment resolution for allowlist.
-        // Empty list is fail-closed: no allowlist satisfaction possible.
-        // An empty list is NOT itself a denial at this step — the evaluator decides.
-        var allowlistResolutions = ExecCommandResolver.ResolveForAllowlist(
-            argv, evaluationRawCommand, cwd, env);
-
-        // UX patterns for prompting.
-        var allowAlwaysPatterns = ExecCommandResolver.ResolveAllowAlwaysPatterns(argv, cwd, env);
+        // Durable authorization has one source of truth. Shell inspection may identify
+        // inner commands for diagnostics, but only a safely bound reusable command may
+        // satisfy an allowlist or produce an Allow Always pattern.
+        var reusableCommand = ExecReusableCommandBinder.TryBind(argv, cwd, env);
+        IReadOnlyList<ExecCommandResolution> allowlistResolutions =
+            reusableCommand is null ? [] : [reusableCommand.Resolution];
+        IReadOnlyList<string> allowAlwaysPatterns =
+            reusableCommand is null ? [] : [reusableCommand.Pattern];
 
         // If argv is non-empty but resolution is entirely impossible, deny.
         // "Ambiguous or inconsistent" → typed deny, not silent allow.
@@ -74,7 +74,8 @@ public static class ExecApprovalV2Normalizer
             request.TimeoutMs,
             env,
             request.AgentId,
-            request.SessionKey);
+            request.SessionKey,
+            reusableCommand);
 
         return ExecApprovalV2NormalizationOutcome.Ok(identity);
     }

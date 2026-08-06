@@ -113,25 +113,22 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
 
         if (pass1 is ExecHostPolicyDecision.AllowOutcome)
         {
-            // A stored executable-level rule must not authorize a command host whose
-            // argument tail selects a different command or script. Preserve the store
-            // verbatim, but refuse to consume that rule for this invocation.
-            if (context.Security == ExecSecurity.Allowlist
-                && context.AllowlistSatisfied
-                && IsIndirectCommandHost(identity))
-                return LogAndReturn(
-                    ExecApprovalV2Result.ValidationFailed(
-                        "persistent-approval-not-permitted-for-command-host"),
-                    correlationId, promptAttempted: false, fallbackUsed: false,
-                    canonical: context.DisplayCommand);
-
             // Pre-approved path (security=Full, ask=Off or allowlist satisfied): skip prompt.
             // Fail closed if the approved executable cannot be pinned to a resolved path.
-            var preApprovedExecution = BuildApprovedExecution(
-                identity,
-                sanitizedEnv,
-                policyCurrency,
-                resolved.AgentId);
+            var reusableAllow = context.Security == ExecSecurity.Allowlist
+                && context.AllowlistSatisfied;
+            var preApprovedExecution = reusableAllow
+                ? BuildReusableApprovedExecution(
+                    identity.ReusableCommand,
+                    identity,
+                    sanitizedEnv,
+                    policyCurrency,
+                    resolved.AgentId)
+                : BuildApprovedExecution(
+                    identity,
+                    sanitizedEnv,
+                    policyCurrency,
+                    resolved.AgentId);
             if (preApprovedExecution is null)
                 return LogAndReturn(ExecApprovalV2Result.InternalError("unresolved-executable-on-allow"),
                     correlationId, promptAttempted: false, fallbackUsed: false, canonical: context.DisplayCommand);
@@ -230,7 +227,18 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
                     correlationId, promptAttempted, fallbackUsed, canonical: context.DisplayCommand);
             }
             // pass2 is AllowOutcome — record whether AllowAlways was the prompt decision.
-            persistAllowlistEntry = followupDecision == ExecApprovalDecision.AllowAlways;
+            persistAllowlistEntry =
+                followupDecision == ExecApprovalDecision.AllowAlways
+                && context.Security == ExecSecurity.Allowlist;
+            if (persistAllowlistEntry
+                && identity.ReusableCommand is null)
+            {
+                return LogAndReturn(
+                    ExecApprovalV2Result.ValidationFailed(
+                        "persistent-approval-not-permitted-for-command-host"),
+                    correlationId, promptAttempted, fallbackUsed,
+                    canonical: context.DisplayCommand);
+            }
         }
         finally
         {
@@ -239,11 +247,19 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
 
         // Step 8: build payload before any store writes — a fail-closed payload result
         // must not leave persistent allowlist state behind.
-        var execution = BuildApprovedExecution(
-            identity,
-            sanitizedEnv,
-            policyCurrency,
-            resolved.AgentId);
+        var useReusableExecution = persistAllowlistEntry || fallbackAllowWasMatchDependent;
+        var execution = useReusableExecution
+            ? BuildReusableApprovedExecution(
+                identity.ReusableCommand,
+                identity,
+                sanitizedEnv,
+                policyCurrency,
+                resolved.AgentId)
+            : BuildApprovedExecution(
+                identity,
+                sanitizedEnv,
+                policyCurrency,
+                resolved.AgentId);
         if (execution is null)
             return LogAndReturn(ExecApprovalV2Result.InternalError("unresolved-executable-on-allow"),
                 correlationId, promptAttempted, fallbackUsed, canonical: context.DisplayCommand);
@@ -259,15 +275,6 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             return LogAndReturn(
                 ExecApprovalV2Result.ValidationFailed("policy-changed-before-execution"),
                 correlationId, promptAttempted, fallbackUsed, canonical: context.DisplayCommand);
-
-        var durableCommandHostAuthorization =
-            persistAllowlistEntry || fallbackAllowWasMatchDependent;
-        if (durableCommandHostAuthorization && IsIndirectCommandHost(identity))
-            return LogAndReturn(
-                ExecApprovalV2Result.ValidationFailed(
-                    "persistent-approval-not-permitted-for-command-host"),
-                correlationId, promptAttempted, fallbackUsed,
-                canonical: context.DisplayCommand);
 
         // Step 9: side effects — only reached when the payload is valid.
         // Each side effect is independently best-effort so a failure in one does not skip the other.
@@ -382,11 +389,34 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         };
     }
 
-    private static bool IsIndirectCommandHost(CanonicalCommandIdentity identity)
+    internal static ExecApprovedExecution? BuildReusableApprovedExecution(
+        ExecReusableCommand? reusableCommand,
+        CanonicalCommandIdentity identity,
+        IReadOnlyDictionary<string, string>? sanitizedEnv,
+        ExecApprovalsCurrency? policyCurrency = null,
+        string? policyAgentId = null)
     {
-        var resolvedPath = identity.Resolution?.ResolvedPath;
-        return !string.IsNullOrWhiteSpace(resolvedPath)
-            && ExecCommandToken.IsIndirectCommandHost(resolvedPath);
+        var resolvedPath = reusableCommand?.Resolution.ResolvedPath;
+        if (reusableCommand is null
+            || string.IsNullOrWhiteSpace(resolvedPath)
+            || !Path.IsPathFullyQualified(resolvedPath)
+            || !File.Exists(resolvedPath)
+            || ExecCommandToken.IsIndirectCommandHost(resolvedPath)
+            || resolvedPath.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+            || resolvedPath.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new ExecApprovedExecution(
+            reusableCommand.Argv,
+            identity.Cwd,
+            identity.TimeoutMs,
+            sanitizedEnv)
+        {
+            PolicyCurrency = policyCurrency,
+            PolicyAgentId = policyAgentId,
+        };
     }
 
     // Persists allowAlways patterns after an AllowAlways prompt decision (non-empty only).
@@ -459,9 +489,9 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
             // policy is not ask=always (which would re-add without a fresh decision). Mirrors
             // macOS resolveExecApprovalAllowedDecisions; empty patterns == one-shot.
             AllowAlwaysAvailable =
-                context.Ask != ExecAsk.Always
-                && context.AllowAlwaysPatterns.Count > 0
-                && !IsIndirectCommandHost(identity),
+                context.Security == ExecSecurity.Allowlist
+                && context.Ask != ExecAsk.Always
+                && identity.ReusableCommand is not null,
             AgentId = context.AgentId ?? "main",
             ResolvedPath = ExecApprovalPathDisplay.ExpandShortPath(context.Resolution?.ResolvedPath),
             SessionKey = identity.SessionKey,

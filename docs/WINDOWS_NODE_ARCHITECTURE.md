@@ -499,6 +499,28 @@ The node returns `command-array-required` for a string command and
 `custom-env-not-supported` for a non-empty environment. This explicit boundary
 keeps approval identity and process execution on one argv representation.
 
+#### Decision: bind reusable gateway commands to direct argv
+
+The gateway represents Windows shell text as
+`["cmd.exe", "/d", "/s", "/c", "<command>"]`. V2 may persist or consume an
+allowlist rule only when that carrier contains one statically bindable external
+command. The binder accepts an intentionally small grammar: unquoted literal
+tokens separated by whitespace. It rejects quoting, pipelines, command chains,
+redirection, expansion, caret escapes, grouping, CMD built-ins, batch files,
+unresolved or nonexistent executables, and interpreter/command-host targets.
+
+For a successful binding, one immutable reusable command supplies the resolved
+path used for matching, the persisted pattern, usage metadata, and the direct
+argv executed by the runner. The original CMD wrapper remains the approved
+execution only for an attended Allow once decision or locally selected full
+policy. This prevents the former split where an inner executable suppressed the
+prompt but the outer `cmd.exe` identity was then rejected.
+
+Permissions **Ask** maps to prompt-on-miss: a reusable allowlist match runs
+without prompting. A manually configured literal `ask: "always"` still prompts
+every time. Allow always is offered only for a reusable command under allowlist
+security and persists that command's resolved executable path.
+
 ### Location → Windows.Devices.Geolocation
 
 ```csharp

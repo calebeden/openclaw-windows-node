@@ -34,6 +34,10 @@ public sealed class CanonicalCommandIdentity
     // Suggested allowlist patterns for prompt/UI. Not a security decision.
     public IReadOnlyList<string> AllowAlwaysPatterns { get; }
 
+    // The only identity eligible for durable allowlist authorization and execution.
+    // Null means the request can be approved only as an exact one-time/full-policy operation.
+    public ExecReusableCommand? ReusableCommand { get; }
+
     // ── Request context (carried from ValidatedRunRequest) ────────────────────
 
     public string? Cwd { get; }
@@ -53,7 +57,8 @@ public sealed class CanonicalCommandIdentity
         int timeoutMs,
         IReadOnlyDictionary<string, string>? env,
         string? agentId,
-        string? sessionKey)
+        string? sessionKey,
+        ExecReusableCommand? reusableCommand = null)
     {
         Command = command;
         DisplayCommand = displayCommand;
@@ -66,5 +71,6 @@ public sealed class CanonicalCommandIdentity
         Env = env;
         AgentId = agentId;
         SessionKey = sessionKey;
+        ReusableCommand = reusableCommand;
     }
 }

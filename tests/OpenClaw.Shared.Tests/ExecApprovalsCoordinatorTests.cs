@@ -245,7 +245,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Prompt_CanonicalCmdWrapper_MarksAllowAlwaysUnavailable()
+    public async Task Prompt_CanonicalSingleCommand_MarksAllowAlwaysAvailable()
     {
         WriteStoreFile("""{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
         var capturing = new CapturingPromptHandler(ExecApprovalPromptOutcome.Deny);
@@ -257,7 +257,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
                 "caa3");
 
         Assert.NotNull(capturing.Captured);
-        Assert.False(capturing.Captured!.AllowAlwaysAvailable);
+        Assert.True(capturing.Captured!.AllowAlwaysAvailable);
     }
 
     // ── Policy-currency re-check on the prompt path (macOS parity) ──
@@ -887,8 +887,8 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     public async Task Allow_ModifiedEnvWrapper_FailsClosedWithNoStoreWrite()
     {
         // A modified env wrapper is approved (security=allowlist, ask=always, AllowAlways) but
-        // the payload cannot carry the modifier semantics faithfully. The result must be
-        // InternalError and the store must not be modified — no new allowlist entry persisted.
+        // the payload cannot carry the modifier semantics faithfully. The result must fail
+        // validation and the store must not be modified.
         const string initialStore = """{"version":1,"defaults":{"security":"allowlist","ask":"always"}}""";
         WriteStoreFile(initialStore);
         var req = Req("""{"command":["env","FOO=bar","cmd","/c","echo","hello"]}""");
@@ -896,7 +896,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             canPresent: AlwaysCanPresentEvaluator.Instance,
             prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowAlways))
             .HandleAsync(req, "env-modifier-no-persist");
-        Assert.Equal(ExecApprovalV2Code.InternalError, result.Code);
+        Assert.Equal(ExecApprovalV2Code.ValidationFailed, result.Code);
         var storeText = File.ReadAllText(Path.Combine(_dir, "exec-approvals.json"));
         Assert.Equal(initialStore, storeText);
     }
@@ -1031,8 +1031,8 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
             "command-host-stored");
 
-        Assert.Equal(ExecApprovalV2Code.ValidationFailed, result.Code);
-        Assert.Equal("persistent-approval-not-permitted-for-command-host", result.Reason);
+        Assert.Equal(ExecApprovalV2Code.AllowlistMiss, result.Code);
+        Assert.Equal("allowlist-miss", result.Reason);
         Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
     }
 
@@ -1046,8 +1046,8 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
             "command-host-fallback");
 
-        Assert.Equal(ExecApprovalV2Code.ValidationFailed, result.Code);
-        Assert.Equal("persistent-approval-not-permitted-for-command-host", result.Reason);
+        Assert.Equal(ExecApprovalV2Code.UserDenied, result.Code);
+        Assert.Equal("user-denied", result.Reason);
         Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
     }
 
@@ -1061,8 +1061,8 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
             "command-host-full-allowlist-fallback");
 
-        Assert.Equal(ExecApprovalV2Code.ValidationFailed, result.Code);
-        Assert.Equal("persistent-approval-not-permitted-for-command-host", result.Reason);
+        Assert.Equal(ExecApprovalV2Code.UserDenied, result.Code);
+        Assert.Equal("user-denied", result.Reason);
         Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
     }
 
@@ -1087,6 +1087,124 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             "command-host-full");
 
         Assert.True(result.IsAllow);
+    }
+
+    [Fact]
+    public async Task StoredHostnameRule_CanonicalCmdCarrier_ExecutesBoundHostnameDirectly()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""");
+
+        var result = await MakeCoordinator().HandleAsync(
+            Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+            "bound-hostname-stored");
+
+        Assert.True(result.IsAllow);
+        Assert.NotNull(result.Execution);
+        Assert.Single(result.Execution!.Argv);
+        Assert.EndsWith(
+            "hostname.exe",
+            result.Execution.Argv[0],
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            result.Execution.Argv,
+            arg => arg.Equals("/c", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task AllowAlways_CanonicalHostname_PersistsAndExecutesBoundCommand()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowAlways))
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+                "bound-hostname-always");
+
+        Assert.True(result.IsAllow);
+        Assert.Single(result.Execution!.Argv);
+        Assert.EndsWith(
+            "hostname.exe",
+            result.Execution.Argv[0],
+            StringComparison.OrdinalIgnoreCase);
+        var resolved = new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main");
+        var entry = Assert.Single(resolved.Allowlist);
+        Assert.Equal(result.Execution.Argv[0], entry.Pattern, ignoreCase: true);
+    }
+
+    [Fact]
+    public async Task AllowOnce_CanonicalHostname_PreservesOriginalCmdCarrier()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowOnce))
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+                "bound-hostname-once");
+
+        Assert.True(result.IsAllow);
+        Assert.EndsWith("cmd.exe", result.Execution!.Argv[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(["/d", "/s", "/c", "hostname.exe"], result.Execution.Argv.Skip(1).ToArray());
+        Assert.Empty(new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
+    }
+
+    [Fact]
+    public async Task StaticPipeline_WithInnerRules_StillPromptsOnceWithoutAllowAlways()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"},{"pattern":"**/findstr.exe"}]}}}""");
+        var prompt = new CapturingPromptHandler(ExecApprovalPromptOutcome.Deny);
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: prompt)
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe | findstr.exe host"]}"""),
+                "pipeline-once");
+
+        Assert.Equal(ExecApprovalV2Code.UserDenied, result.Code);
+        Assert.NotNull(prompt.Captured);
+        Assert.False(prompt.Captured!.AllowAlwaysAvailable);
+    }
+
+    [Fact]
+    public async Task AskAlways_StoredHostnameRule_StillPrompts()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"always"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""");
+        var prompt = new CapturingPromptHandler(ExecApprovalPromptOutcome.Deny);
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: prompt)
+            .HandleAsync(
+                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+                "bound-hostname-ask-always");
+
+        Assert.Equal(ExecApprovalV2Code.UserDenied, result.Code);
+        Assert.NotNull(prompt.Captured);
+        Assert.False(prompt.Captured!.AllowAlwaysAvailable);
+    }
+
+    [Fact]
+    public async Task StoredWhereRule_TabDelimitedArgument_ExecutesBoundDirectArgv()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/where.exe"}]}}}""");
+
+        var result = await MakeCoordinator().HandleAsync(
+            Req("""{"command":["cmd.exe","/d","/s","/c","where.exe\thello"]}"""),
+            "bound-tab-delimited");
+
+        Assert.True(result.IsAllow);
+        Assert.EndsWith("where.exe", result.Execution!.Argv[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(["hello"], result.Execution.Argv.Skip(1).ToArray());
     }
 
     [Fact]

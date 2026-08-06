@@ -98,6 +98,68 @@ public sealed class MxcSetupAndConnectTests
     }
 
     [MxcE2EFact]
+    public async Task RealGateway_SystemRun_UsesBoundHostnameAllowlistRule()
+    {
+        await AssertPrimaryTrayReadyAndGatewayCliHealthyAsync();
+        await SetExecApprovalForBoundHostnameProofAsync();
+
+        var gateway = _fixture.ReadActiveGatewayRecord();
+        var env = GatewayTokenEnv(gateway.SharedGatewayToken);
+        var nodeId = _fixture.ReadActiveGatewayDeviceId();
+        var logCursor = GetTrayLogCursor();
+        const string commandText = "hostname.exe";
+        var invokeParams = JsonSerializer.Serialize(new
+        {
+            nodeId,
+            command = "system.run",
+            @params = new
+            {
+                command = new[] { "cmd.exe", "/d", "/s", "/c", commandText },
+                rawCommand = commandText,
+                timeoutMs = SystemRunProofTimeoutMs
+            },
+            timeoutMs = NodeInvokeProofTimeoutMs,
+            idempotencyKey = Guid.NewGuid().ToString("N")
+        });
+
+        var invoke = await _fixture.RunInWslAsync(
+            $"openclaw gateway call node.invoke --params {ShellSingleQuote(invokeParams)} --json --timeout {GatewayCliProofTimeoutMs}",
+            GatewayCliProofProcessTimeout,
+            env,
+            inputViaStdin: true);
+
+        AssertCommandSucceeded(invoke, "invoke allowlisted hostname through real gateway");
+        using var invokeDoc = JsonDocument.Parse(ExtractJsonObject(invoke.Stdout));
+        if (invokeDoc.RootElement.TryGetProperty("ok", out var ok))
+        {
+            Assert.True(
+                ok.GetBoolean(),
+                $"Expected gateway node.invoke ok=true; response: {invokeDoc.RootElement.GetRawText()}");
+        }
+
+        var payload = ReadNodeInvokePayload(invokeDoc.RootElement);
+        Assert.Equal(0, payload.GetProperty("exitCode").GetInt32());
+        var stdout = payload.GetProperty("stdout").GetString() ?? "";
+        Assert.False(string.IsNullOrWhiteSpace(stdout));
+
+        var approvalLog = await WaitForTrayLogLineContainingAsync(
+            TimeSpan.FromSeconds(30),
+            logCursor,
+            "[EXEC-APPROVALS]",
+            "decision=allow",
+            "promptAttempted=false");
+        var requestLog = await WaitForTrayLogLineContainingAsync(
+            TimeSpan.FromSeconds(30),
+            logCursor,
+            "[mxc] system.run sandbox request",
+            "executor=mxc-direct-appc",
+            "contained=True",
+            "shell=<direct-argv>");
+        Console.WriteLine($"[E2E] bound hostname approval: {approvalLog}");
+        Console.WriteLine($"[E2E] bound hostname MXC request: {requestLog}");
+    }
+
+    [MxcE2EFact]
     public async Task RealGateway_SystemRun_BlocksWritesToTrayDataDirectoryInMxcSandbox()
     {
         const string sourcePayload = "OPENCLAW_GATEWAY_SYSTEM_RUN_MXC_DENIED_PAYLOAD";
@@ -254,6 +316,65 @@ public sealed class MxcSetupAndConnectTests
             .GetProperty("file").GetProperty("defaults").GetProperty("security").GetString();
         Assert.Equal("full", security);
         Console.WriteLine($"[E2E] V2 exec approvals set LOCALLY to full at {approvalsPath} (remote full is guarded; MXC sandbox enforces containment)");
+    }
+
+    private async Task SetExecApprovalForBoundHostnameProofAsync()
+    {
+        using var policy = await _fixture.Client!.CallToolExpectSuccessAsync("system.execApprovals.get");
+        var approvalsPath = policy.RootElement.GetProperty("path").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(approvalsPath));
+
+        var fileObject = new
+        {
+            version = 1,
+            defaults = new
+            {
+                security = "allowlist",
+                ask = "off",
+                askFallback = "deny",
+                autoAllowSkills = false
+            },
+            agents = new Dictionary<string, object>
+            {
+                ["main"] = new
+                {
+                    security = "allowlist",
+                    ask = "off",
+                    askFallback = "deny",
+                    autoAllowSkills = false,
+                    allowlist = new[]
+                    {
+                        new
+                        {
+                            id = Guid.NewGuid(),
+                            pattern = "**/hostname.exe"
+                        }
+                    }
+                }
+            }
+        };
+        var json = JsonSerializer.Serialize(
+            fileObject,
+            new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = true
+            });
+        Directory.CreateDirectory(Path.GetDirectoryName(approvalsPath!)!);
+        await File.WriteAllTextAsync(approvalsPath!, json);
+
+        using var confirm = await _fixture.Client.CallToolExpectSuccessAsync(
+            "system.execApprovals.get");
+        var allowlist = confirm.RootElement
+            .GetProperty("file")
+            .GetProperty("agents")
+            .GetProperty("main")
+            .GetProperty("allowlist");
+        Assert.Contains(
+            allowlist.EnumerateArray(),
+            entry => entry.GetProperty("pattern").GetString() == "**/hostname.exe");
+        Console.WriteLine(
+            $"[E2E] V2 exec approvals set LOCALLY to allowlist hostname.exe at {approvalsPath}");
     }
 
     private TrayLogCursor GetTrayLogCursor()
