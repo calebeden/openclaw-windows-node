@@ -125,6 +125,7 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
     {
         using var beforeDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
         Assert.Equal(1, beforeDoc.RootElement.GetProperty("file").GetProperty("version").GetInt32());
+        Assert.False(beforeDoc.RootElement.TryGetProperty("baseHash", out _));
         var baseHash = beforeDoc.RootElement.GetProperty("hash").GetString()!;
 
         var beforeFile = beforeDoc.RootElement.GetProperty("file").Clone();
@@ -140,6 +141,7 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
             file = beforeFile,
         });
         Assert.False(string.IsNullOrWhiteSpace(setDoc.RootElement.GetProperty("hash").GetString()));
+        Assert.False(setDoc.RootElement.TryGetProperty("baseHash", out _));
 
         using var afterDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
         var allowlist = afterDoc.RootElement.GetProperty("file")

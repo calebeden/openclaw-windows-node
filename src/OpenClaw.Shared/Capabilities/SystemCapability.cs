@@ -520,7 +520,6 @@ public class SystemCapability : NodeCapabilityBase
             path = snapshot.Path,
             exists = snapshot.Exists,
             hash = snapshot.Hash,
-            baseHash = snapshot.Hash,
             file = System.Text.Json.JsonSerializer.SerializeToElement(
                 redactedFile,
                 ExecApprovalsStore.JsonOptions),
