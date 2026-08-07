@@ -74,6 +74,24 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     private void WriteStoreFile(string json)
         => File.WriteAllText(Path.Combine(_dir, "exec-approvals.json"), json);
 
+    // Coordinator requests cannot carry a custom env (the validator returns
+    // custom-env-not-supported), so a bare payload name resolves against the process
+    // PATH. Pick the first candidate this host can actually pin: where a toolchain such
+    // as coreutils shadows a system name, the resolved path contains a space and the
+    // binder correctly refuses it, which is a different claim than the ones under test.
+    private static (ExecReusableCommand? Bound, string Payload) FindBindablePayload()
+    {
+        foreach (var candidate in new[] { "where.exe", "whoami.exe", "hostname.exe" })
+        {
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", candidate], cwd: null, env: null);
+            if (bound is not null && bound.IsCarrierTransport)
+                return (bound, candidate);
+        }
+
+        return (null, "");
+    }
+
     private string LegacyPolicyPath => Path.Combine(_dir, "exec-policy.json");
 
     private ExecApprovalsCoordinator MakeCoordinator(
@@ -1223,6 +1241,62 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         Assert.Equal("^\0\0$", entry.ArgPattern);
     }
 
+    // Transport is chosen independently of which policy branch allowed the command. A
+    // pre-approved security=full/ask=off run reaches process launch without a prompt, so
+    // an unpinned carrier there would re-resolve both cmd.exe and its payload at launch
+    // exactly as an unpinned one-time allow would.
+    [Fact]
+    public async Task PreApprovedFullPolicy_CanonicalCarrier_ExecutesThePinnedCarrier()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var (bound, payload) = FindBindablePayload();
+        Assert.NotNull(bound);
+
+        WriteStoreFile("""{"version":1,"defaults":{"security":"full","ask":"off"}}""");
+
+        var result = await MakeCoordinator()
+            .HandleAsync(
+                Req($$"""{"command":["cmd.exe","/d","/s","/c","{{payload}}"]}"""),
+                "full-carrier-preapproved");
+
+        Assert.True(result.IsAllow);
+        Assert.Equal(SystemCmdPath, result.Execution!.Argv[0], StringComparer.OrdinalIgnoreCase);
+        Assert.NotEqual(payload, result.Execution.Argv[4]);
+        Assert.True(Path.IsPathFullyQualified(result.Execution.Argv[4]));
+        Assert.Equal(bound!.ExecutionArgv.ToArray(), result.Execution.Argv.ToArray());
+    }
+
+    // A direct command is resolved twice: once by the normalizer for the execution
+    // identity and once by the binder for the identity that is displayed and stored.
+    // Execution must use the binder's, so the image the operator approved is the image
+    // that runs even if the two lookups of the same name could disagree.
+    [Fact]
+    public async Task AllowOnce_DirectCommand_ExecutesTheBoundResolution()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var bound = ExecReusableCommandBinder.TryBind(
+            [SystemHostnamePath], cwd: null, env: null);
+        Assert.NotNull(bound);
+        Assert.False(bound!.IsCarrierTransport);
+
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowOnce))
+            .HandleAsync(
+                Req($$"""{"command":["{{SystemHostnameJson}}"]}"""),
+                "direct-once");
+
+        Assert.True(result.IsAllow);
+        Assert.Equal(bound.Argv.ToArray(), result.Execution!.Argv.ToArray());
+        Assert.Equal(bound.Pattern, result.Execution.Argv[0], StringComparer.OrdinalIgnoreCase);
+        Assert.Empty(new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
+    }
+
     // The carrier form survives a one-time allow, but both launch-time lookups are pinned:
     // argv[0] is the resolved system cmd.exe and the payload token is fully qualified. The
     // operator was shown the inner executable the binder resolved, so the request's own argv
@@ -1232,24 +1306,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     {
         if (!OperatingSystem.IsWindows()) return;
 
-        // Same binder the coordinator uses. Coordinator requests cannot carry a custom env,
-        // so the bare payload resolves against the process PATH: pick the first candidate
-        // this host can actually pin. On a machine where coreutils shadows a system name the
-        // resolved path contains a space and the binder correctly refuses it, which is a
-        // different claim than the one under test.
-        ExecReusableCommand? bound = null;
-        var payload = "";
-        foreach (var candidate in new[] { "where.exe", "whoami.exe", "hostname.exe" })
-        {
-            bound = ExecReusableCommandBinder.TryBind(
-                ["cmd.exe", "/d", "/s", "/c", candidate], cwd: null, env: null);
-            if (bound is not null && bound.IsCarrierTransport)
-            {
-                payload = candidate;
-                break;
-            }
-            bound = null;
-        }
+        var (bound, payload) = FindBindablePayload();
         Assert.NotNull(bound);
 
         WriteStoreFile(

@@ -117,9 +117,9 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         {
             // Pre-approved path (security=Full, ask=Off or allowlist satisfied): skip prompt.
             // Fail closed if the approved executable cannot be pinned to a resolved path.
-            var reusableAllow = context.Security == ExecSecurity.Allowlist
+            var requiresReusableAllow = context.Security == ExecSecurity.Allowlist
                 && context.AllowlistSatisfied;
-            var preApprovedExecution = reusableAllow
+            var preApprovedExecution = UseReusableExecution(identity, requiresReusableAllow)
                 ? BuildReusableApprovedExecution(
                     identity.ReusableCommand,
                     identity,
@@ -279,9 +279,7 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         // re-resolve against PATH or cwd. Neither is the image that was shown and approved.
         // This is a transport choice only. Durability is still governed by
         // requiresReusableExecution, so a one-time allow persists nothing.
-        var useReusableExecution =
-            requiresReusableExecution
-            || identity.ReusableCommand?.IsCarrierTransport == true;
+        var useReusableExecution = UseReusableExecution(identity, requiresReusableExecution);
 
         var execution = useReusableExecution
             ? BuildReusableApprovedExecution(
@@ -373,6 +371,24 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
                 ExecApprovalRevalidationResult.NotCurrent("policy-revalidation-failed"));
         }
     }
+
+    // Chooses the execution transport, independently of durability and of which policy
+    // branch allowed the command. Whenever the binder produced a reusable command, that
+    // command's argv is the identity the operator was shown and the identity durable
+    // policy describes, so it is also what has to run. Anything else lets a second
+    // resolver pick the image after the decision was made: an unpinned carrier re-resolves
+    // both cmd.exe and its payload at launch, and a direct command would execute the
+    // normalizer's earlier resolution rather than the binder's, which is a separate lookup
+    // of the same name and can disagree with it. The two builders agree on shape for a
+    // direct command (BindDirect applies the same env-wrapper unwrapping and rejects
+    // wrappers with modifiers), so this only ever changes which resolution supplies the
+    // executable.
+    //
+    // `required` stays the durability gate: an allowlist-satisfied or match-dependent
+    // allow must have a reusable command or fail closed. Choosing this transport never
+    // persists anything on its own.
+    private static bool UseReusableExecution(CanonicalCommandIdentity identity, bool required)
+        => required || identity.ReusableCommand is not null;
 
     // Builds the approved execution payload from the RESOLVED executable path, never
     // the raw argv[0]. The command must execute with the same canonical identity it

@@ -621,15 +621,20 @@ text is untouched. The tail's arity is preserved as well, so a pre-joined tail s
 one element and a tokenized tail keeps its elements and no new process-creation
 quoting is introduced.
 
-Both pins apply to **every** approved run of a recognized canonical carrier,
-including a one-time Allow Once, not only to durable approvals. Approval identity
-and durability are separate from execution transport: the prompt names the inner
-executable the binder resolved through a trusted system `cmd.exe`, so executing the
-request's own argv instead would reopen both launch-time lookups after the operator
-had already decided, and a `cmd.exe` planted earlier on PATH than the system
-directory would run in place of the image that was shown. Pinning a one-time allow
-persists nothing; durability is still gated separately on an Allow Always decision
-with a bound reusable command.
+Both pins apply to **every** approved run of a recognized canonical carrier: a durable
+Allow Always, a one-time Allow Once, an allowlist hit that never prompts, and a
+pre-approved `security=full` run. Approval identity and durability are separate from
+execution transport. The prompt names the inner executable the binder resolved through
+a trusted system `cmd.exe`, so executing the request's own argv instead would reopen
+both launch-time lookups after the decision had been made, and a `cmd.exe` planted
+earlier on PATH than the system directory would run in place of the image that was
+shown. Choosing this transport persists nothing; durability is gated separately on an
+Allow Always decision with a bound reusable command.
+
+The same rule covers a directly invoked executable, which is resolved twice: once by
+the normalizer for the execution identity and once by the binder for the identity that
+is displayed and stored. Execution uses the binder's resolution, so the two lookups can
+never disagree about which image the operator approved.
 
 Pinning is refused rather than approximated. The pinned path must be writable into
 the payload as a single token that `cmd` reads back byte for byte: no whitespace, no
