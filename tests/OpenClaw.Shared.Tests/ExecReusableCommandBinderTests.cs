@@ -260,27 +260,29 @@ public class ExecReusableCommandBinderTests
         }
     }
 
-    // Adopted from b9be5f40: a real Windows .com image is executed directly by
-    // CreateProcess, so it is bindable.
+    // b9be5f40 proposed making .com durably bindable alongside .exe. That widening is
+    // deliberately NOT taken here: adding an executable format to the durable
+    // authorization allowlist is its own decision, and this change is scoped to
+    // carrier binding. A real Windows .com image therefore stays prompt-only.
     [Fact]
-    public void NativeComExtensionTarget_Binds()
+    public void NativeComExtensionTarget_DoesNotBind()
     {
         var target = Path.Combine(Environment.SystemDirectory, "chcp.com");
         Assert.True(File.Exists(target), $"Native Windows .com target was not found: {target}");
 
-        var bound = ExecReusableCommandBinder.TryBind([target], cwd: null, env: null);
-
-        Assert.NotNull(bound);
-        Assert.Equal(target, bound!.Argv[0], ignoreCase: true);
+        Assert.Null(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
     }
 
-    // .com is a directly-executable image, so it must classify the same as .exe.
-    // Otherwise powershell.com would slip past a control that stops powershell.exe.
+    // Transitional quarantine only. A provenance-less legacy entry that names
+    // powershell.com must go inert exactly as one naming powershell.exe does,
+    // otherwise the change in model would silently upgrade a case the old catalog
+    // refused outright. This is classification for quarantine, not bindability:
+    // NativeComExtensionTarget_DoesNotBind above is the bindability contract.
     [Theory]
     [InlineData("powershell.com")]
     [InlineData(@"C:\tools\python.com")]
     [InlineData("PYTHON.COM")]
-    public void ComExtension_ClassifiesAsTheSameCommandHostAsExe(string token)
+    public void ComExtension_QuarantinesAsTheSameCommandHostAsExe(string token)
         => Assert.True(ExecCommandToken.IsLegacyQuarantinedHost(token));
 
     private static string RunCapturingStdout(IReadOnlyList<string> argv, string cwd)
@@ -907,6 +909,7 @@ public class ExecReusableCommandBinderTests
     [InlineData(".msc")]
     [InlineData(".bat")]
     [InlineData(".cmd")]
+    [InlineData(".com")]
     public void NonExecutableExtensionTarget_DoesNotBind(string extension)
     {
         var directory = Directory.CreateTempSubdirectory("openclaw-binder-ext");
@@ -916,26 +919,6 @@ public class ExecReusableCommandBinderTests
             File.WriteAllText(target, "rem placeholder");
 
             Assert.Null(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
-        }
-        finally
-        {
-            directory.Delete(recursive: true);
-        }
-    }
-
-    // .com is run as an image by CreateProcess exactly like .exe, so it is bindable.
-    [Theory]
-    [InlineData(".exe")]
-    [InlineData(".com")]
-    public void DirectlyExecutableImageTarget_Binds(string extension)
-    {
-        var directory = Directory.CreateTempSubdirectory("openclaw-binder-image");
-        try
-        {
-            var target = Path.Combine(directory.FullName, "probe" + extension);
-            File.Copy(FindTestHostExecutable(), target);
-
-            Assert.NotNull(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
         }
         finally
         {

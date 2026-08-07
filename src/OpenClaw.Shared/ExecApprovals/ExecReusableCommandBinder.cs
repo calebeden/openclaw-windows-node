@@ -277,15 +277,14 @@ internal static class ExecReusableCommandBinder
     /// .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all interpreted
     /// content whose meaning can change without any change to the path that was
     /// approved, so an allowlist of extensions is used here rather than a denylist of
-    /// the two batch extensions. .COM is included because CreateProcess runs it as an
-    /// image the same way it runs .EXE.
+    /// the two batch extensions.
+    ///
+    /// This allowlist is deliberately .EXE only. Widening it to another image format
+    /// is a separate authorization decision with its own review, not a detail of
+    /// carrier binding, so it is not made here.
     /// </summary>
     internal static bool IsBindableExecutable(string path)
-    {
-        var extension = Path.GetExtension(path);
-        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".com", StringComparison.OrdinalIgnoreCase);
-    }
+        => Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase);
 
     private static bool ContainsNul(IReadOnlyList<string> argv)
     {

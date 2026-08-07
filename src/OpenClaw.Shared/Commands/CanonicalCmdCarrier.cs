@@ -268,6 +268,13 @@ internal static class CanonicalCmdCarrier
     /// path to the same file name. Every other token, and all interior spacing, must be
     /// byte-identical.
     ///
+    /// The payload check is done by reconstruction rather than by comparison. We take
+    /// the request's own payload, apply the single edit pinning is permitted to make,
+    /// and require the result to equal the payload actually being executed byte for
+    /// byte. Comparing token values instead would accept a payload whose tokens happen
+    /// to match while its interior spacing was rewritten, which is drift this function
+    /// exists to reject.
+    ///
     /// This is checked again at execution time rather than trusted from bind time,
     /// because a rewritten command line is the one place metacharacter drift could be
     /// introduced between approval and launch.
@@ -304,18 +311,22 @@ internal static class CanonicalCmdCarrier
             return false;
         }
 
-        if (requestTokens.Count != executionTokens.Count || executionTokens.Count == 0)
+        if (requestTokens.Count == 0 || executionTokens.Count == 0)
             return false;
-
-        for (var i = 1; i < requestTokens.Count; i++)
-        {
-            if (!string.Equals(requestTokens[i], executionTokens[i], StringComparison.Ordinal))
-                return false;
-        }
 
         var pinned = executionTokens[0];
         if (!Path.IsPathFullyQualified(pinned)
             || !CmdPayloadTokenizer.IsSafelyRepresentableToken(pinned))
+        {
+            return false;
+        }
+
+        // Reconstruct the only payload this request is allowed to have become. Equality
+        // here proves argument values, argument count, and every byte of interior
+        // spacing survived unchanged, because the sole edit applied was the executable
+        // token span.
+        if (!CmdPayloadTokenizer.TryPinExecutable(requestPayload, pinned, out var expectedPayload)
+            || !string.Equals(expectedPayload, executionPayload, StringComparison.Ordinal))
         {
             return false;
         }

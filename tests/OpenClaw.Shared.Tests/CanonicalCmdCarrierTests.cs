@@ -162,6 +162,37 @@ public class CanonicalCmdCarrierTests
         Assert.False(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(tampered, request));
     }
 
+    // Interior spacing is part of the approved command line, not incidental
+    // formatting. Every tamper below leaves the token values identical, so a check
+    // that compared only tokens would accept them. The payload is verified by
+    // reconstructing it from the request instead, so byte-level respacing is refused.
+    [Theory]
+    [InlineData(@"C:\tools\tool.exe  --flag")]
+    [InlineData("C:\\tools\\tool.exe\t--flag")]
+    [InlineData(@" C:\tools\tool.exe --flag")]
+    [InlineData(@"C:\tools\tool.exe --flag ")]
+    public void PinnedCarrier_RejectsInteriorSpacingChangesThatPreserveTokens(string respaced)
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", "tool.exe --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            @"C:\tools\tool.exe",
+            out var pinned));
+
+        var tampered = pinned.ToArray();
+        tampered[4] = respaced;
+
+        // Guard the premise: the tamper really does preserve the token values, so the
+        // rejection below is attributable to spacing and nothing else.
+        Assert.True(CmdPayloadTokenizer.TryTokenize(pinned[4], out var originalTokens, out _));
+        Assert.True(CmdPayloadTokenizer.TryTokenize(respaced, out var respacedTokens, out _));
+        Assert.Equal(originalTokens.ToArray(), respacedTokens.ToArray());
+        Assert.False(string.Equals(pinned[4], respaced, StringComparison.Ordinal));
+
+        Assert.False(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(tampered, request));
+    }
+
     // A bare payload name legitimately gains its PATHEXT extension when resolved, so
     // "tool" pinned to "...\tool.exe" is the same identity spelled completely.
     [Fact]

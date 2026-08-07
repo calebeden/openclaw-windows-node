@@ -519,11 +519,13 @@ command. The binder accepts an intentionally small grammar: unquoted literal
 tokens separated by whitespace. It rejects quoting, pipelines, command chains,
 redirection, expansion, caret escapes, grouping, CMD built-ins, unresolved or
 nonexistent executables, and wrapper/interpreter targets. Durable binding is
-further restricted to native `.exe` and `.com` images, which CreateProcess runs
+further restricted to native `.exe` images, which CreateProcess runs
 directly: PATH resolution probes every `PATHEXT` entry, so a bare name can
-otherwise resolve to `.bat`, `.cmd`, `.vbs`, `.js`, `.wsf`, or `.msc` content
-whose meaning is delegated to an interpreter without any change to the approved
-path.
+otherwise resolve to `.bat`, `.cmd`, `.com`, `.vbs`, `.js`, `.wsf`, or `.msc`
+content whose meaning is delegated to an interpreter without any change to the
+approved path. The allowlist is `.exe` only on purpose: adding another image
+format to durable authorization is a separate decision with its own review, not
+a detail of carrier binding.
 
 For a successful binding, one immutable reusable command supplies the resolved
 path used for matching, the persisted pattern, usage metadata, and the direct

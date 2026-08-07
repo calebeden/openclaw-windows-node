@@ -21,8 +21,15 @@ internal static class ExecCommandToken
     }
 
     // Returns the basename without a directly-executable image suffix (lowercased).
-    // Both .exe and .com are stripped because both are run as images by CreateProcess,
-    // so `python.com` and `python.exe` must classify identically.
+    //
+    // .exe is stripped because that is how command identities are ordinarily spelled.
+    // .com is stripped for one narrow reason only: IsLegacyQuarantinedHost below has
+    // to recognize a provenance-less legacy entry that names `powershell.com`, which
+    // the old catalog would have refused, exactly as it recognizes `powershell.exe`.
+    // Without this, that entry would quietly become more permissive than it was when
+    // it was written. This is a classification detail of the transitional quarantine
+    // and says nothing about which images may be bound durably; that is decided
+    // solely by ExecReusableCommandBinder.IsBindableExecutable, which is .exe only.
     internal static string NormalizedBasename(string token)
     {
         var b = BasenameLower(token);

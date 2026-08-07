@@ -238,8 +238,11 @@ public class ExecAllowlistArgBindingTests
             [legacy, sibling], Resolution(target), [target, "other.py"]));
     }
 
-    // .com is executed as an image just like .exe, so it must classify the same way.
-    // Otherwise python.com would slip past a quarantine that stops python.exe.
+    // Transitional quarantine only. A provenance-less legacy entry naming python.com
+    // must go inert exactly as one naming python.exe does, otherwise the change in
+    // model would silently upgrade a case the old catalog refused outright. This says
+    // nothing about bindability: .com is not durably bindable (see
+    // ExecReusableCommandBinderTests.NativeComExtensionTarget_DoesNotBind).
     [Fact]
     public void LegacyPathOnlyEntryForACommandHostWithComExtension_IsInert()
     {
