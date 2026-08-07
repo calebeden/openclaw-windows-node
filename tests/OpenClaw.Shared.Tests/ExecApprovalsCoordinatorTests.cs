@@ -1006,7 +1006,31 @@ public class ExecApprovalsCoordinatorTests : IDisposable
     // explicit choice and matches upstream matchAllowlist. Only generated rules are
     // required to pin their arguments.
     [Fact]
-    public async Task StoredAllowlist_HandWrittenPathOnlyRule_AuthorizesCommandHost()
+    public async Task StoredAllowlist_HandWrittenPathOnlyRule_AuthorizesOrdinaryExecutable()
+    {
+        const string initialStore =
+            """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""";
+        WriteStoreFile(initialStore);
+        var result = await MakeCoordinator().HandleAsync(
+            Req("""{"command":["C:\\Windows\\System32\\hostname.exe","--fqdn"]}"""),
+            "path-only-stored");
+
+        Assert.True(result.IsAllow);
+
+        // Recording usage is expected; widening the rule is not.
+        var entry = Assert.Single(
+            new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
+        Assert.Equal("**/hostname.exe", entry.Pattern);
+        Assert.Null(entry.Source);
+        Assert.Null(entry.ArgPattern);
+    }
+
+    // D6. The same shape of rule aimed at an interpreter is a record written when this
+    // node refused interpreters durable approval outright. Moving to argument binding
+    // must not quietly convert that denial into an unconditional allow, so the entry
+    // goes inert and the command prompts. It is left on disk exactly as written.
+    [Fact]
+    public async Task StoredAllowlist_LegacyPathOnlyRule_DoesNotAuthorizeCommandHost()
     {
         const string initialStore =
             """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/wsl.exe"}]}}}""";
@@ -1015,43 +1039,65 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
             "command-host-stored");
 
-        Assert.True(result.IsAllow);
-
-        // Recording usage is expected; widening the rule is not.
-        var entry = Assert.Single(
-            new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
-        Assert.Equal("**/wsl.exe", entry.Pattern);
-        Assert.Null(entry.Source);
-        Assert.Null(entry.ArgPattern);
+        Assert.Equal(ExecApprovalV2Code.AllowlistMiss, result.Code);
+        Assert.Equal("allowlist-miss", result.Reason);
+        Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
     }
 
+    // D6 upgrade path: an explicit Allow always writes an argument-bound sibling, and
+    // that sibling authorizes its own invocation from then on. The legacy entry is
+    // still there and still inert.
     [Fact]
-    public async Task HeadlessAllowlistFallback_HandWrittenPathOnlyRule_AuthorizesCommandHost()
+    public async Task ExplicitAllowAlways_RestoresReuseForAQuarantinedHost()
     {
         WriteStoreFile(
-            """{"version":1,"defaults":{"security":"allowlist","ask":"always","askFallback":"allowlist"},"agents":{"main":{"allowlist":[{"pattern":"**/wsl.exe"}]}}}""");
+            """{"version":1,"defaults":{"security":"allowlist","ask":"always"},"agents":{"main":{"allowlist":[{"pattern":"**/wsl.exe"}]}}}""");
+        var allowed = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowAlways))
+            .HandleAsync(
+                Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
+                "command-host-upgrade");
+        Assert.True(allowed.IsAllow);
+
+        var allowlist = new ExecApprovalsStore(_dir, NullLogger.Instance)
+            .ResolveReadOnly("main").Allowlist;
+        Assert.Equal(2, allowlist.Count);
+        var legacy = Assert.Single(allowlist, e => e.Source is null);
+        Assert.Equal("**/wsl.exe", legacy.Pattern);
+        Assert.Null(legacy.ArgPattern);
+
+        var sibling = Assert.Single(allowlist, e => e.Source == "allow-always");
+        Assert.NotNull(sibling.ArgPattern);
+    }
+
+    [Fact]
+    public async Task HeadlessAllowlistFallback_HandWrittenPathOnlyRule_AuthorizesOrdinaryExecutable()
+    {
+        WriteStoreFile(
+            """{"version":1,"defaults":{"security":"allowlist","ask":"always","askFallback":"allowlist"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""");
         var result = await MakeCoordinator().HandleAsync(
-            Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
-            "command-host-fallback");
+            Req("""{"command":["C:\\Windows\\System32\\hostname.exe","--fqdn"]}"""),
+            "path-only-fallback");
 
         Assert.True(result.IsAllow);
 
         var entry = Assert.Single(
             new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
-        Assert.Equal("**/wsl.exe", entry.Pattern);
+        Assert.Equal("**/hostname.exe", entry.Pattern);
         Assert.Null(entry.Source);
         Assert.Null(entry.ArgPattern);
     }
 
     [Fact]
-    public async Task HeadlessFullWithAllowlistFallback_HandWrittenPathOnlyRule_AuthorizesCommandHost()
+    public async Task HeadlessFullWithAllowlistFallback_HandWrittenPathOnlyRule_AuthorizesOrdinaryExecutable()
     {
         const string initialStore =
-            """{"version":1,"defaults":{"security":"full","ask":"always","askFallback":"allowlist"},"agents":{"main":{"allowlist":[{"pattern":"**/wsl.exe"}]}}}""";
+            """{"version":1,"defaults":{"security":"full","ask":"always","askFallback":"allowlist"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""";
         WriteStoreFile(initialStore);
         var result = await MakeCoordinator().HandleAsync(
-            Req("""{"command":["C:\\Windows\\System32\\wsl.exe","--exec","echo","ok"]}"""),
-            "command-host-full-allowlist-fallback");
+            Req("""{"command":["C:\\Windows\\System32\\hostname.exe","--fqdn"]}"""),
+            "path-only-full-allowlist-fallback");
 
         Assert.True(result.IsAllow);
         Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
@@ -1116,11 +1162,18 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         Assert.True(result.IsAllow);
         Assert.NotNull(result.Execution);
 
-        // The executed command is byte-for-byte the request. Any rewriting here would
-        // be an opportunity for the executed command to drift from the approved one.
+        // The executed command is the request with exactly the two pinned resolutions
+        // applied: the system cmd.exe image, and the payload executable's resolved
+        // absolute path. Nothing else may be rewritten, or the executed command could
+        // drift from the approved one.
         Assert.Equal(
-            [SystemCmdPath, "/d", "/s", "/c", "hostname.exe"],
-            result.Execution!.Argv.ToArray());
+            [SystemCmdPath, "/d", "/s", "/c", result.Execution!.Argv[4]],
+            result.Execution.Argv.ToArray());
+        Assert.EndsWith(
+            @"\hostname.exe",
+            result.Execution.Argv[4],
+            StringComparison.OrdinalIgnoreCase);
+        Assert.True(Path.IsPathFullyQualified(result.Execution.Argv[4]));
     }
 
     [Fact]
@@ -1138,8 +1191,10 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            [SystemCmdPath, "/d", "/s", "/c", "hostname.exe"],
-            result.Execution!.Argv.ToArray());
+            [SystemCmdPath, "/d", "/s", "/c", result.Execution!.Argv[4]],
+            result.Execution.Argv.ToArray());
+        Assert.EndsWith(
+            @"\hostname.exe", result.Execution.Argv[4], StringComparison.OrdinalIgnoreCase);
 
         // The stored rule describes the inner executable, not the carrier, so a later
         // request that reaches the same program by another route is also authorized.
@@ -1257,8 +1312,14 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            [SystemCmdPath, "/d", "/s", "/c", "where.exe\thello"],
-            result.Execution!.Argv.ToArray());
+            [SystemCmdPath, "/d", "/s", "/c", result.Execution!.Argv[4]],
+            result.Execution.Argv.ToArray());
+        // Pinning replaces only the executable token; the tab and the argument after
+        // it are preserved exactly.
+        Assert.EndsWith(
+            @"\where.exe" + "\thello",
+            result.Execution.Argv[4],
+            StringComparison.OrdinalIgnoreCase);
     }
 
     // Regression: an unbindable command must still show the operator a resolved
@@ -1302,9 +1363,12 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             "bound-multi-element-tail");
 
         Assert.True(result.IsAllow);
+        Assert.Equal(6, result.Execution!.Argv.Count);
         Assert.Equal(
-            [SystemCmdPath, "/d", "/s", "/c", "where.exe", "hello"],
-            result.Execution!.Argv.ToArray());
+            [SystemCmdPath, "/d", "/s", "/c", result.Execution.Argv[4], "hello"],
+            result.Execution.Argv.ToArray());
+        Assert.EndsWith(
+            @"\where.exe", result.Execution.Argv[4], StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1325,8 +1389,10 @@ public class ExecApprovalsCoordinatorTests : IDisposable
 
         Assert.True(result.IsAllow);
         Assert.Equal(
-            [cmdPath, "/d", "/s", "/c", "hostname.exe"],
-            result.Execution!.Argv.ToArray());
+            [cmdPath, "/d", "/s", "/c", result.Execution!.Argv[4]],
+            result.Execution.Argv.ToArray());
+        Assert.EndsWith(
+            @"\hostname.exe", result.Execution.Argv[4], StringComparison.OrdinalIgnoreCase);
     }
 
     // A prompt handler that reports AllowAlways under security=full must not widen

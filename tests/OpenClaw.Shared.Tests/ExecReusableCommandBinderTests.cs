@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using OpenClaw.Shared.Commands;
@@ -11,13 +13,14 @@ namespace OpenClaw.Shared.Tests;
 
 public class ExecReusableCommandBinderTests
 {
-    // The carrier is executed verbatim, so cmd.exe re-resolves the payload executable at
-    // launch and searches the current directory before PATH. Our resolver never searches
-    // the current directory. If both were allowed to resolve independently, the binder
-    // would authorize the PATH copy while cmd.exe launched the cwd copy: a durable
-    // approval for one binary silently spending on another. Refuse to bind instead.
+    // Before pinning, the carrier ran verbatim and cmd.exe re-resolved the payload
+    // executable at launch, searching the current directory before PATH. A check at
+    // approval time could not close that: whoever can write to the working directory
+    // after the check simply wins. The payload executable is now pinned to its resolved
+    // absolute path, so cmd has nothing left to search and a shadow dropped afterwards
+    // cannot win.
     [Fact]
-    public void CarrierPayloadShadowedByCurrentDirectory_DoesNotBind()
+    public void CarrierPayloadShadowedByCurrentDirectory_PinsResolvedPath()
     {
         var cwd = Directory.CreateTempSubdirectory("openclaw-cwd-shadow").FullName;
         try
@@ -25,18 +28,17 @@ public class ExecReusableCommandBinderTests
             var shadow = Path.Combine(cwd, "hostname.exe");
             File.WriteAllBytes(shadow, [0x4D, 0x5A]);
 
-            ExecReusableCommandBinder.TryBind(
+            var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd,
                 env: null,
                 out var failure);
 
-            Assert.Equal(
-                ExecReusableCommandBinder.BindFailure.CarrierPayloadExecutableAmbiguous,
-                failure);
-            Assert.Equal(
-                "carrier-payload-executable-ambiguous",
-                ExecReusableCommandBinder.DescribeFailure(failure));
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.NotNull(bound);
+            Assert.True(bound!.IsCarrierTransport);
+            Assert.NotEqual(shadow, bound.Resolution.ResolvedPath, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(bound.Resolution.ResolvedPath, bound.ExecutionArgv[4], ignoreCase: true);
         }
         finally
         {
@@ -44,8 +46,258 @@ public class ExecReusableCommandBinderTests
         }
     }
 
-    // The same carrier binds normally when the current directory holds no shadow, so the
-    // guard above closes the hijack without closing the headline case.
+    // The end-to-end version of the same claim, run through real cmd.exe: bind while the
+    // working directory is clean, then insert the shadow, then execute exactly the argv
+    // the binder authorized. The pinned path must still be what runs.
+    [Fact]
+    public void PinnedCarrier_IgnoresShadowInsertedAfterApproval()
+    {
+        var cwd = Directory.CreateTempSubdirectory("openclaw-post-approval-shadow").FullName;
+        try
+        {
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd,
+                env: null,
+                out var failure);
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.NotNull(bound);
+
+            // whoami prints DOMAIN\user, hostname prints the machine name, so which one
+            // ran is unambiguous from the output alone.
+            File.Copy(
+                Path.Combine(Environment.SystemDirectory, "whoami.exe"),
+                Path.Combine(cwd, "hostname.exe"));
+
+            var stdout = RunCapturingStdout(bound!.ExecutionArgv, cwd);
+
+            Assert.Equal(Environment.MachineName, stdout.Trim(), ignoreCase: true);
+            Assert.DoesNotContain(@"\", stdout.Trim(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(cwd, recursive: true);
+        }
+    }
+
+    // Pinning must never change an argument. The executed payload has to be the
+    // approved one with only its executable token replaced.
+    [Fact]
+    public void PinnedCarrier_PreservesPayloadArgumentsExactly()
+    {
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "hostname.exe\t--first   --second"],
+            cwd: null,
+            env: null,
+            out var failure);
+
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+        Assert.NotNull(bound);
+        Assert.Equal(
+            bound!.Resolution.ResolvedPath + "\t--first   --second",
+            bound.ExecutionArgv[4],
+            ignoreCase: true);
+        Assert.Equal(["--first", "--second"], bound.Argv.Skip(1));
+        Assert.True(
+            ExecApprovalsCoordinator.CarrierTransportMatchesRequest(
+                bound.ExecutionArgv,
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe\t--first   --second"]));
+    }
+
+    // A tokenized tail keeps its arity, so no new process-creation quoting is
+    // introduced by pinning.
+    [Fact]
+    public void PinnedCarrier_PreservesTokenizedTailArity()
+    {
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "hostname.exe", "--version"],
+            cwd: null,
+            env: null,
+            out var failure);
+
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+        Assert.NotNull(bound);
+        Assert.Equal(6, bound!.ExecutionArgv.Count);
+        Assert.Equal(bound.Resolution.ResolvedPath, bound.ExecutionArgv[4], ignoreCase: true);
+        Assert.Equal("--version", bound.ExecutionArgv[5]);
+    }
+
+    // A resolved path containing a space cannot be pinned. Quoting it does not help:
+    // under /s cmd strips the first and last quote of the payload and uses the rest
+    // verbatim, which leaves the path ambiguous again. Fail closed to prompt-only
+    // rather than pin something cmd will re-split.
+    [Fact]
+    public void CarrierPayloadResolvingToPathWithSpace_DoesNotBind()
+    {
+        var root = Directory.CreateTempSubdirectory("openclaw-spaced").FullName;
+        var spaced = Path.Combine(root, "program files");
+        Directory.CreateDirectory(spaced);
+        try
+        {
+            File.Copy(
+                Path.Combine(Environment.SystemDirectory, "hostname.exe"),
+                Path.Combine(spaced, "spacedtool.exe"));
+
+            ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "spacedtool.exe"],
+                cwd: null,
+                env: new Dictionary<string, string>
+                {
+                    ["PATH"] = spaced,
+                    ["PATHEXT"] = ".EXE",
+                },
+                out var failure);
+
+            Assert.Equal(
+                ExecReusableCommandBinder.BindFailure.CarrierPayloadNotPinnable,
+                failure);
+            Assert.Equal(
+                "carrier-payload-not-pinnable",
+                ExecReusableCommandBinder.DescribeFailure(failure));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(@"C:\tools\a b\tool.exe")]
+    [InlineData(@"C:\tools\a%b\tool.exe")]
+    [InlineData(@"C:\tools\a!b\tool.exe")]
+    [InlineData(@"C:\tools\a^b\tool.exe")]
+    [InlineData("C:\\tools\\a\"b\\tool.exe")]
+    [InlineData(@"C:\tools\a&b\tool.exe")]
+    [InlineData(@"C:\tools\a(b)\tool.exe")]
+    [InlineData("C:\\tools\\a\tb\\tool.exe")]
+    [InlineData(@"C:\tools\a,b\tool.exe")]
+    [InlineData(@"C:\tools\a;b\tool.exe")]
+    [InlineData(@"C:\tools\a=b\tool.exe")]
+    public void UnsafelyRepresentedPinnedPath_RefusesReconstruction(string pinned)
+    {
+        Assert.False(
+            CanonicalCmdCarrier.TryBuildPinnedCarrier(
+                ["cmd.exe", "/d", "/s", "/c", "tool.exe --flag"],
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                pinned,
+                out _));
+    }
+
+    // Rewriting must work from the token span, never from a search and replace: an
+    // argument that repeats the executable's text has to survive untouched.
+    [Fact]
+    public void PinnedCarrier_DoesNotRewriteArgumentsThatRepeatTheExecutableText()
+    {
+        Assert.True(
+            CanonicalCmdCarrier.TryBuildPinnedCarrier(
+                ["cmd.exe", "/d", "/s", "/c", "tool.exe --compare=tool.exe"],
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                @"C:\tools\tool.exe",
+                out var pinnedArgv));
+
+        Assert.Equal(@"C:\tools\tool.exe --compare=tool.exe", pinnedArgv[4]);
+    }
+
+    // Adopted from the contributor's resolved-carrier-identity fix (b9be5f40), which
+    // detected a bare "cmd.exe" resolving outside System32 and refused to bind. Pinning
+    // supersedes that: argv[0] is set to the system image, so a rogue cmd.exe first on
+    // PATH is not merely detected, it is never the thing that runs. The invariant the
+    // original test protected (an attacker-supplied cmd image is never looked through)
+    // is preserved and strengthened.
+    [Fact]
+    public void BareCmdResolvingOutsideSystemDirectory_ExecutesTheSystemImage()
+    {
+        var directory = Directory.CreateTempSubdirectory("openclaw-untrusted-bare-cmd");
+        try
+        {
+            var rogueCmd = Path.Combine(directory.FullName, "cmd.exe");
+            File.Copy(FindTestHostExecutable(), rogueCmd);
+            var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PATH"] = directory.FullName,
+                ["PATHEXT"] = ".EXE",
+            };
+
+            var bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd: null,
+                env);
+
+            Assert.NotNull(bound);
+            Assert.NotEqual(rogueCmd, bound!.ExecutionArgv[0], StringComparer.OrdinalIgnoreCase);
+            Assert.StartsWith(
+                Environment.SystemDirectory,
+                bound.ExecutionArgv[0],
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    // A relocated image merely *named* cmd.exe is still never looked through.
+    [Fact]
+    public void RelocatedCmdImage_IsNotATrustedCarrier()
+    {
+        var directory = Directory.CreateTempSubdirectory("openclaw-relocated-cmd");
+        try
+        {
+            var rogueCmd = Path.Combine(directory.FullName, "cmd.exe");
+            File.Copy(FindTestHostExecutable(), rogueCmd);
+
+            Assert.Null(ExecReusableCommandBinder.TryBind(
+                [rogueCmd, "/d", "/s", "/c", "hostname.exe"],
+                cwd: null,
+                env: null));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    // Adopted from b9be5f40: a real Windows .com image is executed directly by
+    // CreateProcess, so it is bindable.
+    [Fact]
+    public void NativeComExtensionTarget_Binds()
+    {
+        var target = Path.Combine(Environment.SystemDirectory, "chcp.com");
+        Assert.True(File.Exists(target), $"Native Windows .com target was not found: {target}");
+
+        var bound = ExecReusableCommandBinder.TryBind([target], cwd: null, env: null);
+
+        Assert.NotNull(bound);
+        Assert.Equal(target, bound!.Argv[0], ignoreCase: true);
+    }
+
+    // .com is a directly-executable image, so it must classify the same as .exe.
+    // Otherwise powershell.com would slip past a control that stops powershell.exe.
+    [Theory]
+    [InlineData("powershell.com")]
+    [InlineData(@"C:\tools\python.com")]
+    [InlineData("PYTHON.COM")]
+    public void ComExtension_ClassifiesAsTheSameCommandHostAsExe(string token)
+        => Assert.True(ExecCommandToken.IsLegacyQuarantinedHost(token));
+
+    private static string RunCapturingStdout(IReadOnlyList<string> argv, string cwd)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = argv[0],
+            WorkingDirectory = cwd,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        for (var i = 1; i < argv.Count; i++)
+            psi.ArgumentList.Add(argv[i]);
+
+        using var process = Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(30_000);
+        return stdout;
+    }
     [Fact]
     public void CarrierPayloadWithoutCurrentDirectoryShadow_StillBinds()
     {
@@ -131,26 +383,29 @@ public class ExecReusableCommandBinderTests
     }
 
     // An omitted cwd is not the same as "no current directory": the child inherits this
-    // process's, and cmd.exe searches it before PATH just the same.
+    // process's, and cmd.exe searches it before PATH just the same. Pinning covers that
+    // case too, because the payload no longer contains anything for cmd to search for.
     [Fact]
-    public void CarrierPayloadShadowedByInheritedDirectory_DoesNotBind()
+    public void CarrierPayloadShadowedByInheritedDirectory_PinsResolvedPath()
     {
         var cwd = Directory.CreateTempSubdirectory("openclaw-inherited-shadow").FullName;
         var original = Environment.CurrentDirectory;
         try
         {
-            File.WriteAllBytes(Path.Combine(cwd, "hostname.exe"), [0x4D, 0x5A]);
+            var shadow = Path.Combine(cwd, "hostname.exe");
+            File.WriteAllBytes(shadow, [0x4D, 0x5A]);
             Environment.CurrentDirectory = cwd;
 
-            ExecReusableCommandBinder.TryBind(
+            var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd: null,
                 env: null,
                 out var failure);
 
-            Assert.Equal(
-                ExecReusableCommandBinder.BindFailure.CarrierPayloadExecutableAmbiguous,
-                failure);
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.NotNull(bound);
+            Assert.NotEqual(shadow, bound!.ExecutionArgv[4], StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(bound.Resolution.ResolvedPath, bound.ExecutionArgv[4], ignoreCase: true);
         }
         finally
         {
@@ -231,11 +486,14 @@ public class ExecReusableCommandBinderTests
         Assert.True(bound!.IsCarrierTransport);
         Assert.EndsWith("hostname.exe", bound.Argv[0], StringComparison.OrdinalIgnoreCase);
 
-        // argv[0] is pinned to the resolved system cmd.exe so Windows cannot
-        // re-resolve the bare name at launch; everything after it is verbatim.
+        // Both resolutions the carrier would otherwise perform at launch are pinned:
+        // argv[0] to the resolved system cmd.exe, and the payload executable to its
+        // resolved absolute path. The switches in between are verbatim.
         Assert.True(Path.IsPathFullyQualified(bound.ExecutionArgv[0]));
         Assert.EndsWith("cmd.exe", bound.ExecutionArgv[0], StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(command.AsSpan(1).ToArray(), bound.ExecutionArgv.Skip(1).ToArray());
+        Assert.Equal(["/d", "/s", "/c"], bound.ExecutionArgv.Skip(1).Take(3));
+        Assert.Equal(bound.Argv[0], bound.ExecutionArgv[4], ignoreCase: true);
+        Assert.Equal(5, bound.ExecutionArgv.Count);
     }
 
     [Fact]
@@ -637,14 +895,13 @@ public class ExecReusableCommandBinderTests
             cwd: null,
             env: null));
 
-    // ── PATHEXT targets that are not PE executables ───────────────────────────
+    // ── PATHEXT targets that are not directly-executable images ───────────────
 
     [Theory]
     [InlineData(".js")]
     [InlineData(".vbs")]
     [InlineData(".wsf")]
     [InlineData(".msc")]
-    [InlineData(".com")]
     [InlineData(".bat")]
     [InlineData(".cmd")]
     public void NonExecutableExtensionTarget_DoesNotBind(string extension)
@@ -656,6 +913,26 @@ public class ExecReusableCommandBinderTests
             File.WriteAllText(target, "rem placeholder");
 
             Assert.Null(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    // .com is run as an image by CreateProcess exactly like .exe, so it is bindable.
+    [Theory]
+    [InlineData(".exe")]
+    [InlineData(".com")]
+    public void DirectlyExecutableImageTarget_Binds(string extension)
+    {
+        var directory = Directory.CreateTempSubdirectory("openclaw-binder-image");
+        try
+        {
+            var target = Path.Combine(directory.FullName, "probe" + extension);
+            File.Copy(FindTestHostExecutable(), target);
+
+            Assert.NotNull(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
         }
         finally
         {

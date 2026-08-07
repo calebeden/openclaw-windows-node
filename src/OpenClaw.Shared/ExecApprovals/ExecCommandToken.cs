@@ -20,11 +20,16 @@ internal static class ExecCommandToken
         return name.ToLowerInvariant();
     }
 
-    // Returns the basename without .exe suffix (lowercased).
+    // Returns the basename without a directly-executable image suffix (lowercased).
+    // Both .exe and .com are stripped because both are run as images by CreateProcess,
+    // so `python.com` and `python.exe` must classify identically.
     internal static string NormalizedBasename(string token)
     {
         var b = BasenameLower(token);
-        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? b[..^4] : b;
+        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            || b.EndsWith(".com", StringComparison.OrdinalIgnoreCase)
+            ? b[..^4]
+            : b;
     }
 
     internal static bool IsEnv(string token) =>
@@ -42,7 +47,65 @@ internal static class ExecCommandToken
     // wrapper invocations are classified by shape rather than by name
     // (ExecShellWrapperNormalizer, CanonicalCmdCarrier). Do not reintroduce a
     // name-based list as the security boundary.
+    //
+    // IsLegacyQuarantinedHost below is NOT that boundary and must not become it. It
+    // applies to exactly one thing: an allowlist entry already on disk that carries no
+    // provenance and no argument binding, written when this catalog was the rule. Such
+    // an entry cannot be reasoned about, because we cannot tell a deliberate operator
+    // rule from one this node generated under the old model. For an ordinary program
+    // it keeps working. For a name this node once refused outright it goes inert and
+    // prompts, so the previously denied case is not silently upgraded to allowed by
+    // the change in model. New rules never reach this path; they always carry an
+    // argument binding, which is the real control.
+    private static readonly System.Collections.Generic.HashSet<string> s_legacyQuarantinedHosts =
+        new(StringComparer.Ordinal)
+        {
+            "sh", "bash", "zsh", "dash", "ash", "ksh", "fish",
+            "cmd", "powershell", "pwsh",
+            "wsl", "cscript", "wscript",
+            "py", "pyw", "python", "pythonw", "pypy",
+            "node", "nodejs", "deno", "bun", "qjs",
+            "ruby", "jruby", "perl", "php", "lua", "luajit",
+            "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
+            "r", "rscript", "tclsh", "wish", "groovy",
+        };
 
+    /// <summary>
+    /// True when a token names a program that the previous model refused to approve
+    /// durably. Read the note above before using this: it exists only to keep a
+    /// provenance-less legacy allowlist entry from becoming more permissive than it was
+    /// when it was written, and it is not a security boundary on its own.
+    /// </summary>
+    internal static bool IsLegacyQuarantinedHost(string token)
+    {
+        var name = NormalizedBasename(token);
+        if (name.Length == 0) return false;
+        if (s_legacyQuarantinedHosts.Contains(name)) return true;
+
+        // Versioned interpreters (python3, python3.12, pypy3.10) were covered by the
+        // old catalog too, so they stay covered here.
+        return IsVersionedInterpreter(name, "python")
+            || IsVersionedInterpreter(name, "pythonw")
+            || IsVersionedInterpreter(name, "pypy");
+    }
+
+    private static bool IsVersionedInterpreter(string name, string prefix)
+    {
+        if (name.Length <= prefix.Length
+            || !name.StartsWith(prefix, StringComparison.Ordinal))
+            return false;
+
+        var sawDigit = false;
+        for (var i = prefix.Length; i < name.Length; i++)
+        {
+            var ch = name[i];
+            if (ch == '.') continue;
+            if (ch is < '0' or > '9') return false;
+            sawDigit = true;
+        }
+
+        return sawDigit;
+    }
 
     // Extracts the first shell-tokenized word from a command pattern. Quoted paths
     // remain one token, and a suffix after the closing quote is preserved so

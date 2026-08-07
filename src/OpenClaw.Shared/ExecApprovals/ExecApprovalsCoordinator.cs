@@ -452,32 +452,20 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         };
     }
 
-    // The carrier that runs must be the argv that was validated and evaluated, with a
-    // single permitted difference: argv[0] may be the resolved absolute path of the
-    // same trusted system cmd.exe the request named. Every other element must be
-    // identical, because a rewritten command line is the one way metacharacter drift
-    // could be introduced between approval and launch.
+    // The carrier that runs must be the argv that was validated and evaluated, with
+    // exactly two permitted differences, both of which remove a resolution that would
+    // otherwise happen at launch instead of at approval:
+    //   argv[0] may be the resolved absolute path of the same trusted system cmd.exe
+    //     the request named, and
+    //   the payload's executable token may be the fully qualified path of the same
+    //     program name the payload named.
+    // Every other token, and all interior spacing, must be identical, because a
+    // rewritten command line is the one way metacharacter drift could be introduced
+    // between approval and launch.
     internal static bool CarrierTransportMatchesRequest(
         IReadOnlyList<string> executionArgv,
         IReadOnlyList<string> requestArgv)
-    {
-        if (executionArgv.Count != requestArgv.Count || executionArgv.Count == 0)
-            return false;
-
-        var requestCarrier = CanonicalCmdCarrier.ResolveTrustedCarrierPath(requestArgv[0]);
-        if (requestCarrier is null
-            || !string.Equals(executionArgv[0], requestCarrier, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        for (var i = 1; i < executionArgv.Count; i++)
-        {
-            if (!string.Equals(executionArgv[i], requestArgv[i], StringComparison.Ordinal))
-                return false;
-        }
-        return true;
-    }
+        => CanonicalCmdCarrier.PinnedCarrierMatchesRequest(executionArgv, requestArgv);
 
     // Persists allowAlways patterns after an AllowAlways prompt decision (non-empty only).
     // Caller guarantees Security == Allowlist (guard is in HandleAsync step 8).

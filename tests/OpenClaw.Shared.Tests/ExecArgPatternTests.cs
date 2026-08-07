@@ -179,6 +179,75 @@ public class ExecAllowlistArgBindingTests
 
         Assert.Same(bound, match);
     }
+
+    // Upgrade behavior. A provenance-less entry written under the previous model, when
+    // the target was an interpreter or shell that model refused outright, must not
+    // become an unconditional allow just because the model changed. It goes inert and
+    // the command prompts.
+    [Theory]
+    [InlineData(@"C:\Python312\python.exe")]
+    [InlineData(@"C:\Python312\python3.12.exe")]
+    [InlineData(@"C:\Windows\System32\wsl.exe")]
+    [InlineData(@"C:\Windows\System32\cmd.exe")]
+    [InlineData(@"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")]
+    [InlineData(@"C:\Program Files\PowerShell\7\pwsh.exe")]
+    [InlineData(@"C:\Program Files\nodejs\node.exe")]
+    [InlineData(@"C:\Windows\System32\cscript.exe")]
+    public void LegacyPathOnlyEntryForACommandHost_IsInert(string target)
+    {
+        var entry = new ExecAllowlistEntry { Pattern = target };
+
+        Assert.Null(ExecAllowlistMatcher.Match(
+            [entry], Resolution(target), [target, "-c", "print(1)"]));
+    }
+
+    // The quarantine is narrow on purpose: an ordinary program keeps working from a
+    // provenance-less rule, because a human who wrote one meant it.
+    [Theory]
+    [InlineData(@"C:\Windows\System32\hostname.exe")]
+    [InlineData(@"C:\Program Files\Git\cmd\git.exe")]
+    [InlineData(@"C:\tools\ripgrep\rg.exe")]
+    public void LegacyPathOnlyEntryForAnOrdinaryExecutable_StillMatches(string target)
+    {
+        var entry = new ExecAllowlistEntry { Pattern = target };
+
+        Assert.NotNull(ExecAllowlistMatcher.Match(
+            [entry], Resolution(target), [target, "--anything"]));
+    }
+
+    // The quarantined entry is left alone, not rewritten. The only way a command host
+    // becomes reusable is an explicit Allow always, which writes an argument-bound
+    // sibling. That sibling matches its own command and nothing else.
+    [Fact]
+    public void ExplicitlyApprovedSiblingRestoresAMatchForAQuarantinedHost()
+    {
+        const string target = @"C:\Python312\python.exe";
+        var argv = new[] { target, "build.py" };
+        var legacy = new ExecAllowlistEntry { Pattern = target };
+        var sibling = new ExecAllowlistEntry
+        {
+            Pattern = target,
+            ArgPattern = ExecArgPattern.BuildArgPattern(argv),
+            Source = "allow-always",
+        };
+
+        Assert.Same(
+            sibling,
+            ExecAllowlistMatcher.Match([legacy, sibling], Resolution(target), argv));
+        Assert.Null(ExecAllowlistMatcher.Match(
+            [legacy, sibling], Resolution(target), [target, "other.py"]));
+    }
+
+    // .com is executed as an image just like .exe, so it must classify the same way.
+    // Otherwise python.com would slip past a quarantine that stops python.exe.
+    [Fact]
+    public void LegacyPathOnlyEntryForACommandHostWithComExtension_IsInert()
+    {
+        const string target = @"C:\tools\python.com";
+        var entry = new ExecAllowlistEntry { Pattern = target };
+
+        Assert.Null(ExecAllowlistMatcher.Match([entry], Resolution(target), [target, "-c", "1"]));
+    }
 }
 
 // rawCommand is the text an operator is shown. If it could disagree with the argv

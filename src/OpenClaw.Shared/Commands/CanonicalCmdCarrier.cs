@@ -121,12 +121,13 @@ internal static class CanonicalCmdCarrier
     /// Recognizes <c>cmd[.exe] /d /s /c &lt;tail...&gt;</c> and reconstructs the single
     /// command-line string cmd.exe receives.
     ///
-    /// The tail may be a single pre-joined element or several already-tokenized
-    /// elements; upstream approval fixtures use both. A multi-element tail is only
-    /// reconstructible when every element is free of whitespace and quotes, because
-    /// otherwise the process-creation quoting is not recoverable by a plain space
-    /// join. Non-reconstructible tails return false so callers fail closed rather
-    /// than guessing at a different command than the one that will run.
+    /// The live gateway uses one pre-joined tail element. Low-level callers and
+    /// upstream approval fixtures may provide several already-tokenized elements.
+    /// A multi-element tail is reconstructible only when every element is free of
+    /// whitespace and quotes, because otherwise the process-creation quoting is not
+    /// recoverable by a plain space join. Non-reconstructible tails return false so
+    /// callers fail closed rather than guessing at a different command than the one
+    /// that will run.
     /// </summary>
     internal static bool TryGetCanonicalPayload(IReadOnlyList<string> argv, out string payload) =>
         TryGetCanonicalPayload(argv, requireTrustedCarrier: false, out payload);
@@ -189,5 +190,149 @@ internal static class CanonicalCmdCarrier
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Builds the carrier that will actually run, with the payload's executable token
+    /// pinned to <paramref name="pinnedExecutable"/> (the binder-resolved absolute
+    /// path) and everything else preserved.
+    ///
+    /// Preserving the carrier keeps the in-band PATH and TEMP bootstrap that MXC
+    /// requires, but a preserved carrier also means cmd.exe resolves the payload
+    /// executable itself, at launch, searching the working directory before PATH. That
+    /// is a different resolver running at a different time than the one that authorized
+    /// the command, so the two can disagree and an attacker who can write to the
+    /// working directory decides which one wins. Pinning removes the second resolution
+    /// entirely: cmd is handed a fully qualified path and has nothing left to search.
+    ///
+    /// argv[0] is pinned to the resolved system cmd.exe for the same reason.
+    ///
+    /// Everything else is byte-preserved. The tail arity is preserved too: a
+    /// pre-joined tail stays one element and a tokenized tail keeps its elements, so
+    /// no new process-creation quoting is introduced. Returns false when the pinned
+    /// path cannot be represented in the payload without changing how cmd parses it,
+    /// which fails closed to prompt-only.
+    /// </summary>
+    internal static bool TryBuildPinnedCarrier(
+        IReadOnlyList<string> argv,
+        string carrierPath,
+        string pinnedExecutable,
+        out IReadOnlyList<string> pinnedArgv)
+    {
+        pinnedArgv = [];
+        if (!TryGetTrustedCanonicalPayload(argv, out var payload))
+            return false;
+        if (string.IsNullOrWhiteSpace(carrierPath) || !Path.IsPathFullyQualified(carrierPath))
+            return false;
+        if (!Path.IsPathFullyQualified(pinnedExecutable))
+            return false;
+        if (!CmdPayloadTokenizer.TryPinExecutable(payload, pinnedExecutable, out var pinnedPayload))
+            return false;
+
+        var rebuilt = new string[argv.Count];
+        rebuilt[0] = carrierPath;
+        rebuilt[1] = argv[1];
+        rebuilt[2] = argv[2];
+        rebuilt[3] = argv[3];
+
+        if (argv.Count == 5)
+        {
+            rebuilt[4] = pinnedPayload;
+        }
+        else
+        {
+            // A tokenized tail keeps one payload token per element, so the executable
+            // is exactly element 4 and the rest are copied untouched.
+            rebuilt[4] = pinnedExecutable;
+            for (var i = 5; i < argv.Count; i++)
+                rebuilt[i] = argv[i];
+        }
+
+        // Differential check: the carrier we are about to run must still parse as the
+        // canonical shape and must yield exactly the payload we intended. This catches
+        // any arity or joining mistake above rather than trusting the construction.
+        if (!TryGetTrustedCanonicalPayload(rebuilt, out var roundTripped)
+            || !string.Equals(roundTripped, pinnedPayload, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        pinnedArgv = rebuilt;
+        return true;
+    }
+
+    /// <summary>
+    /// Verifies that a carrier about to be executed differs from the validated request
+    /// only in the two ways pinning is allowed to change it: argv[0] resolved to the
+    /// system cmd.exe, and the payload's executable token replaced by a fully qualified
+    /// path to the same file name. Every other token, and all interior spacing, must be
+    /// byte-identical.
+    ///
+    /// This is checked again at execution time rather than trusted from bind time,
+    /// because a rewritten command line is the one place metacharacter drift could be
+    /// introduced between approval and launch.
+    /// </summary>
+    internal static bool PinnedCarrierMatchesRequest(
+        IReadOnlyList<string> executionArgv,
+        IReadOnlyList<string> requestArgv)
+    {
+        if (executionArgv.Count != requestArgv.Count || executionArgv.Count < 5)
+            return false;
+
+        var carrierPath = ResolveTrustedCarrierPath(requestArgv[0]);
+        if (carrierPath is null
+            || !string.Equals(executionArgv[0], carrierPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        for (var i = 1; i <= 3; i++)
+        {
+            if (!string.Equals(executionArgv[i], requestArgv[i], StringComparison.Ordinal))
+                return false;
+        }
+
+        if (!TryGetCanonicalPayload(requestArgv, out var requestPayload)
+            || !TryGetTrustedCanonicalPayload(executionArgv, out var executionPayload))
+        {
+            return false;
+        }
+
+        if (!CmdPayloadTokenizer.TryTokenize(requestPayload, out var requestTokens, out _)
+            || !CmdPayloadTokenizer.TryTokenize(executionPayload, out var executionTokens, out _))
+        {
+            return false;
+        }
+
+        if (requestTokens.Count != executionTokens.Count || executionTokens.Count == 0)
+            return false;
+
+        for (var i = 1; i < requestTokens.Count; i++)
+        {
+            if (!string.Equals(requestTokens[i], executionTokens[i], StringComparison.Ordinal))
+                return false;
+        }
+
+        var pinned = executionTokens[0];
+        if (!Path.IsPathFullyQualified(pinned)
+            || !CmdPayloadTokenizer.IsSafelyRepresentableToken(pinned))
+        {
+            return false;
+        }
+
+        // The pinned path must still name the same program the request named, so
+        // pinning can sharpen an identity but never swap it for a different one. A
+        // bare name legitimately gains its PATHEXT extension when it is resolved, so
+        // "tool" pinned to "...\tool.exe" is the same identity spelled completely.
+        var requestName = Path.GetFileName(requestTokens[0].Replace('/', '\\'));
+        var pinnedName = Path.GetFileName(pinned);
+        if (string.Equals(pinnedName, requestName, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return !Path.HasExtension(requestName)
+            && string.Equals(
+                Path.GetFileNameWithoutExtension(pinnedName),
+                requestName,
+                StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -45,7 +45,14 @@ internal static class ExecAllowlistMatcher
     //
     // Two kinds of entry with no argPattern exist, and they are not equivalent:
     //   - A hand-written entry has no source. It is a deliberate path-only rule and
-    //     authorizes the executable whatever its arguments.
+    //     authorizes the executable whatever its arguments, with one carve-out: if it
+    //     resolves to a program the previous model refused to approve durably (an
+    //     interpreter, shell, or script host), it goes inert and the command prompts.
+    //     Without that, moving from a name catalog to argument binding would silently
+    //     turn a case that used to be denied outright into one that is allowed with
+    //     any arguments, which is a loosening nobody asked for. The entry is left on
+    //     disk untouched and is not migrated; only an explicit Allow always writes an
+    //     argument-bound sibling, and that sibling then matches normally.
     //   - A generated entry carries source "allow-always". Generated entries have
     //     bound their arguments since argument binding was introduced, so one that
     //     lacks an argPattern is an older record whose arguments were never pinned.
@@ -74,6 +81,9 @@ internal static class ExecAllowlistMatcher
             if (string.IsNullOrEmpty(entry.ArgPattern))
             {
                 if (string.Equals(entry.Source, AllowAlwaysSource, System.StringComparison.Ordinal))
+                    continue;
+                if (string.IsNullOrEmpty(entry.Source)
+                    && ExecCommandToken.IsLegacyQuarantinedHost(target))
                     continue;
                 pathOnlyMatch ??= entry;
                 continue;

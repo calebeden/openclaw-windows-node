@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
 using OpenClaw.Shared.Commands;
 
 namespace OpenClaw.Shared.ExecApprovals;
@@ -47,7 +46,7 @@ internal static class ExecReusableCommandBinder
         ExecutableNotBindable,
         ExecutableOnNetworkPath,
         ArgumentContainsNul,
-        CarrierPayloadExecutableAmbiguous,
+        CarrierPayloadNotPinnable,
     }
 
     internal static ExecReusableCommand? TryBind(
@@ -107,32 +106,39 @@ internal static class ExecReusableCommandBinder
                 return null;
             }
 
-            // The carrier is preserved verbatim for transport, so cmd.exe re-resolves the
-            // payload executable at launch and it searches the current directory before
-            // PATH. Our resolver never searches the current directory, so a cwd-local file
-            // of the same name means we would authorize one binary and run another. Refuse
-            // the durable binding rather than resolve it two different ways.
-            if (ExecCommandResolver.HasCurrentDirectoryCandidate(payloadArgv[0], cwd, env))
-            {
-                failure = BindFailure.CarrierPayloadExecutableAmbiguous;
+            // The identity looks through the carrier to the inner executable, and the
+            // carrier is preserved for transport so its in-band PATH/TEMP bootstrap
+            // survives. Bind the identity first, because pinning needs the resolved
+            // absolute path that binding produces.
+            var bound = BindDirect(payloadArgv, cwd, env, executionArgv: null, out failure);
+            if (bound is null)
                 return null;
-            }
 
-            // Identity looks through the carrier; transport stays the original argv,
-            // except that argv[0] is pinned to the resolved system cmd.exe so Windows
-            // cannot re-resolve a bare "cmd.exe" against PATH at launch time.
             var carrierPath = CanonicalCmdCarrier.ResolveTrustedCarrierPath(command[0]);
             if (carrierPath is null)
             {
                 failure = BindFailure.UntrustedCarrierImage;
                 return null;
             }
-            var executionArgv = new string[command.Count];
-            executionArgv[0] = carrierPath;
-            for (var i = 1; i < command.Count; i++)
-                executionArgv[i] = command[i];
 
-            return BindDirect(payloadArgv, cwd, env, executionArgv, out failure);
+            // Pin both resolutions the carrier would otherwise perform at launch:
+            // argv[0] so Windows cannot re-resolve a bare "cmd.exe" against PATH, and
+            // the payload's executable token so cmd cannot resolve it against the
+            // working directory. Without the second pin the command is authorized by
+            // one resolver and run by another, and anything able to drop a file in the
+            // working directory after approval picks the winner.
+            //
+            // Pinning is refused, not approximated. A path that cmd would not read back
+            // byte for byte (spaces, quotes, %, !, ^, redirection or grouping
+            // characters) fails closed here and the command stays prompt-only.
+            if (!CanonicalCmdCarrier.TryBuildPinnedCarrier(
+                    command, carrierPath, bound.Argv[0], out var executionArgv))
+            {
+                failure = BindFailure.CarrierPayloadNotPinnable;
+                return null;
+            }
+
+            return new ExecReusableCommand(bound.Argv, bound.Resolution, executionArgv);
         }
 
         if (ExecShellWrapperNormalizer.Extract(command).IsWrapper)
@@ -254,72 +260,31 @@ internal static class ExecReusableCommandBinder
         }
     }
 
+    /// <summary>
+    /// Delegates to <see cref="CmdPayloadTokenizer"/>, which is the single owner of cmd
+    /// payload parsing so the binder and the carrier reconstruction cannot disagree
+    /// about what a payload's tokens are.
+    /// </summary>
     internal static bool TryTokenizeStaticCmdPayload(
         string payload,
         out IReadOnlyList<string> argv)
-    {
-        argv = [];
-        var trimmedStart = payload.TrimStart();
-        if (string.IsNullOrWhiteSpace(trimmedStart)
-            || trimmedStart[0] == '@'
-            || payload.Contains('"')
-            || payload.TrimEnd(' ', '\t').EndsWith('\\'))
-            return false;
-
-        var tokens = new List<string>();
-        var current = new StringBuilder();
-        var tokenStarted = false;
-
-        for (var i = 0; i < payload.Length; i++)
-        {
-            var ch = payload[i];
-            if ((char.IsControl(ch) && ch != '\t')
-                || (char.IsWhiteSpace(ch) && !IsCmdWhitespace(ch))
-                || IsForbiddenCmdSyntax(ch))
-                return false;
-
-            if (IsCmdWhitespace(ch))
-            {
-                if (tokenStarted)
-                {
-                    tokens.Add(current.ToString());
-                    current.Clear();
-                    tokenStarted = false;
-                }
-                continue;
-            }
-
-            tokenStarted = true;
-            current.Append(ch);
-        }
-
-        if (tokenStarted)
-            tokens.Add(current.ToString());
-        if (tokens.Count == 0 || string.IsNullOrWhiteSpace(tokens[0]))
-            return false;
-
-        argv = tokens;
-        return true;
-    }
-
-    private static bool IsForbiddenCmdSyntax(char ch) =>
-        ch is '&' or '|' or '<' or '>' or '^' or '%' or '!' or '(' or ')';
-
-    private static bool IsCmdWhitespace(char ch) => ch is ' ' or '\t';
+        => CmdPayloadTokenizer.TryTokenize(payload, out argv);
 
     /// <summary>
-    /// Durable binding is restricted to real PE executables.
+    /// Durable binding is restricted to images the loader executes directly.
     ///
     /// PATH resolution probes every PATHEXT entry, which by default also includes
-    /// .COM, .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all
-    /// interpreted content whose meaning can change without any change to the path
-    /// that was approved, so an allowlist of extensions is used here rather than a
-    /// denylist of the two batch extensions.
+    /// .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all interpreted
+    /// content whose meaning can change without any change to the path that was
+    /// approved, so an allowlist of extensions is used here rather than a denylist of
+    /// the two batch extensions. .COM is included because CreateProcess runs it as an
+    /// image the same way it runs .EXE.
     /// </summary>
     internal static bool IsBindableExecutable(string path)
     {
         var extension = Path.GetExtension(path);
-        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase);
+        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".com", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Stable diagnostic token for logs and prompts.</summary>
@@ -348,7 +313,7 @@ internal static class ExecReusableCommandBinder
         BindFailure.ExecutableNotBindable => "executable-not-bindable",
         BindFailure.ExecutableOnNetworkPath => "executable-on-network-path",
         BindFailure.ArgumentContainsNul => "argument-contains-nul",
-        BindFailure.CarrierPayloadExecutableAmbiguous => "carrier-payload-executable-ambiguous",
+        BindFailure.CarrierPayloadNotPinnable => "carrier-payload-not-pinnable",
         _ => "unknown",
     };
 }

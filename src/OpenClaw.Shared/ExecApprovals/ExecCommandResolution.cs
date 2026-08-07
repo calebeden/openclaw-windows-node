@@ -419,9 +419,15 @@ internal static class ExecCommandResolver
     /// True when a bare command name would resolve to a file in <paramref name="cwd"/>.
     ///
     /// Our PATH search deliberately excludes the current directory, but cmd.exe searches
-    /// it <em>first</em>. When a carrier's payload is a bare name and the current
-    /// directory holds a matching file, the executable cmd.exe would launch is not the
-    /// one we resolved, so the caller must refuse to bind a durable approval.
+    /// it <em>first</em>.
+    ///
+    /// This is diagnostic only. It used to be the guard that refused to bind a carrier
+    /// whose payload was a bare name, but a check taken at approval time cannot decide
+    /// what cmd.exe will find at launch time; anything able to write to the working
+    /// directory in between simply wins after the check has passed. The carrier's
+    /// payload executable is now pinned to its resolved absolute path instead, which
+    /// leaves cmd nothing to search for. Do not restore this as an authorization
+    /// boundary.
     /// </summary>
     internal static bool HasCurrentDirectoryCandidate(
         string name,
