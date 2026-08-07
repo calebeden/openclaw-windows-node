@@ -48,6 +48,9 @@ public abstract class WebSocketClientBase : IDisposable
     /// <summary>Cancellation token tied to this client's lifetime.</summary>
     protected CancellationToken CancellationToken => _cts.Token;
 
+    /// <summary>Monotonic identity for the current transport connection.</summary>
+    protected long ConnectionGeneration => Interlocked.Read(ref _connectionGeneration);
+
     // Events
     public event EventHandler<ConnectionStatus>? StatusChanged;
     public event EventHandler<string>? AuthenticationFailed;
