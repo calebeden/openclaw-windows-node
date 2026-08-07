@@ -48,8 +48,10 @@ internal static class CanonicalCmdCarrier
     /// through: an unrecognized carrier falls through to the indirect-host
     /// rejection and stays unbindable.
     ///
-    /// The canonical gateway carrier uses the bare name. A fully-qualified path
-    /// is accepted only when it points into the Windows system directories.
+    /// The canonical gateway carrier uses the bare name. A bare name is only a token
+    /// check; <see cref="ResolveTrustedCarrierPath"/> is what resolves it to a real
+    /// system-directory image and is what durable binding requires. A fully-qualified
+    /// token is accepted here only when it already points into one of those directories.
     /// </summary>
     internal static bool IsTrustedCarrierExecutable(string? executable)
     {

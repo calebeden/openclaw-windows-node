@@ -274,14 +274,16 @@ internal static class ExecReusableCommandBinder
     /// Durable binding is restricted to images the loader executes directly.
     ///
     /// PATH resolution probes every PATHEXT entry, which by default also includes
-    /// .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all interpreted
-    /// content whose meaning can change without any change to the path that was
-    /// approved, so an allowlist of extensions is used here rather than a denylist of
-    /// the two batch extensions.
+    /// .COM, .VBS, .VBE, .JS, .JSE, .WSF, .WSH, and .MSC. Those targets are all
+    /// interpreted content whose meaning can change without any change to the path
+    /// that was approved, so an allowlist of extensions is used here rather than a
+    /// denylist of the two batch extensions.
     ///
-    /// This allowlist is deliberately .EXE only. Widening it to another image format
-    /// is a separate authorization decision with its own review, not a detail of
-    /// carrier binding, so it is not made here.
+    /// This allowlist is deliberately .EXE only. Native .com images are executed by
+    /// the loader too, but widening durable authorization to another image format is
+    /// a separate decision with its own review, not a detail of carrier binding, so
+    /// it is not made here. A .com target is still runnable; it is prompt-only, which
+    /// is the fail-closed side.
     /// </summary>
     internal static bool IsBindableExecutable(string path)
         => Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase);

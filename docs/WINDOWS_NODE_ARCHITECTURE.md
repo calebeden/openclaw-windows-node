@@ -491,7 +491,11 @@ The gateway represents Windows shell text as
 Low-level callers and upstream approval fixtures may instead supply a
 reconstructible tokenized tail. The carrier executable may be the bare name or
 the fully qualified system `cmd.exe` path; an arbitrary file merely named
-`cmd.exe` is never a transparent durable-approval carrier.
+`cmd.exe` is never a transparent durable-approval carrier. A bare name is only a
+token check, so durable binding additionally resolves the carrier through
+`ResolveTrustedCarrierPath` and requires a real image in a Windows system
+directory, then pins that absolute path into the executed argv so the loader
+cannot re-resolve it at launch.
 `CanonicalCmdCarrier` is the single owner of that recognition, shared by the
 approvals binder and the MXC command-line builder so the layer that authorizes a
 shape and the layer that runs it cannot disagree. A multi-element tail is only
@@ -510,7 +514,8 @@ otherwise resolve to `.bat`, `.cmd`, `.com`, `.vbs`, `.js`, `.wsf`, or `.msc`
 content whose meaning is delegated to an interpreter without any change to the
 approved path. The allowlist is `.exe` only on purpose: adding another image
 format to durable authorization is a separate decision with its own review, not
-a detail of carrier binding.
+a detail of carrier binding. A `.com` target is still runnable, it is simply
+prompt-only, which is the fail-closed side of that decision.
 
 For a successful binding, one immutable reusable command supplies the resolved
 path used for matching, the persisted pattern, usage metadata, and the direct

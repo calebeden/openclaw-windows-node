@@ -745,11 +745,11 @@ public class ExecReusableCommandBinderTests
     }
 
     // ── Multi-element carrier tails ───────────────────────────────────────────
-    // Upstream approval fixtures send the command text already tokenized across
-    // several argv elements, for example
-    // ["cmd.exe","/d","/s","/c","echo","SAFE&&whoami"]. A binder that only accepts
-    // a single pre-joined tail element silently refuses those, which is exactly the
-    // allowlist failure this work is meant to fix.
+    // Low-level callers and upstream approval fixtures may send command text
+    // already tokenized across several argv elements, for example
+    // ["cmd.exe","/d","/s","/c","echo","SAFE&&whoami"]. Supporting reconstructible
+    // tails preserves compatibility for those callers without changing the live
+    // gateway's single-element command shape.
 
     [Fact]
     public void MultiElementCarrierTail_Binds()
@@ -869,8 +869,15 @@ public class ExecReusableCommandBinderTests
     [Fact]
     public void SystemDirectoryCmd_IsTrustedCarrier()
     {
-        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")));
+        var cmdPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+        Assert.True(CanonicalCmdCarrier.IsTrustedCarrierExecutable(cmdPath));
+        // The contributor's resolved-carrier fix (b9be5f40) asserted this through a
+        // separate IsTrustedSystemCmdPath predicate. ResolveTrustedCarrierPath is the
+        // surviving owner of that question: it answers it and yields the absolute image
+        // that will be pinned into argv[0], so the check and the execution agree.
+        Assert.Equal(cmdPath, CanonicalCmdCarrier.ResolveTrustedCarrierPath(cmdPath), ignoreCase: true);
     }
 
     [Fact]
