@@ -64,6 +64,13 @@ internal static class ExecCommandToken
     // prompts, so the previously denied case is not silently upgraded to allowed by
     // the change in model. New rules never reach this path; they always carry an
     // argument binding, which is the real control.
+    //
+    // The set below is therefore not a judgement about which programs are dangerous.
+    // It is a verbatim copy of the catalog as it stood immediately before argument
+    // binding replaced it (e4ff61e7), because the question it answers is purely
+    // historical: would this exact entry have been refused durable approval when it
+    // was written? Do not curate, prune, or extend this list. Anything added here
+    // would claim to have been denied in a past release when it was not.
     private static readonly System.Collections.Generic.HashSet<string> s_legacyQuarantinedHosts =
         new(StringComparer.Ordinal)
         {
@@ -75,6 +82,14 @@ internal static class ExecCommandToken
             "ruby", "jruby", "perl", "php", "lua", "luajit",
             "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
             "r", "rscript", "tclsh", "wish", "groovy",
+            "mshta", "regsvr32", "rundll32",
+            // Windows binaries that compile, load, or proxy execution of
+            // argument-selected code.
+            "msbuild", "csc", "vbc", "dnx", "rcsi",
+            "installutil", "regasm", "regsvcs", "mavinject",
+            "msiexec", "certutil", "bitsadmin", "wmic",
+            "forfiles", "scriptrunner", "pcalua", "cmstp", "odbcconf",
+            "msdt", "ieexec", "presentationhost", "winrs", "hh", "msxsl", "xwizard",
         };
 
     /// <summary>
@@ -85,30 +100,33 @@ internal static class ExecCommandToken
     /// </summary>
     internal static bool IsLegacyQuarantinedHost(string token)
     {
-        var name = NormalizedBasename(token);
-        if (name.Length == 0) return false;
-        if (s_legacyQuarantinedHosts.Contains(name)) return true;
-
-        // Versioned interpreters (python3, python3.12, pypy3.10) were covered by the
-        // old catalog too, so they stay covered here.
-        return IsVersionedInterpreter(name, "python")
-            || IsVersionedInterpreter(name, "pythonw")
-            || IsVersionedInterpreter(name, "pypy");
+        var basename = NormalizedBasename(token);
+        return s_legacyQuarantinedHosts.Contains(basename)
+            || IsVersionedInterpreter(basename, "python")
+            || IsVersionedInterpreter(basename, "pythonw")
+            || IsVersionedInterpreter(basename, "pypy");
     }
 
-    private static bool IsVersionedInterpreter(string name, string prefix)
+    private static bool IsVersionedInterpreter(string basename, string prefix)
     {
-        if (name.Length <= prefix.Length
-            || !name.StartsWith(prefix, StringComparison.Ordinal))
-            return false;
-
-        var sawDigit = false;
-        for (var i = prefix.Length; i < name.Length; i++)
+        if (!basename.StartsWith(prefix, StringComparison.Ordinal)
+            || basename.Length == prefix.Length)
         {
-            var ch = name[i];
-            if (ch == '.') continue;
-            if (ch is < '0' or > '9') return false;
-            sawDigit = true;
+            return false;
+        }
+
+        var suffix = basename.AsSpan(prefix.Length);
+        var sawDigit = false;
+        foreach (var ch in suffix)
+        {
+            if (char.IsDigit(ch))
+            {
+                sawDigit = true;
+                continue;
+            }
+
+            if (ch != '.')
+                return false;
         }
 
         return sawDigit;

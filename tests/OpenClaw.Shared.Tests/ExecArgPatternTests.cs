@@ -193,6 +193,12 @@ public class ExecAllowlistArgBindingTests
     [InlineData(@"C:\Program Files\PowerShell\7\pwsh.exe")]
     [InlineData(@"C:\Program Files\nodejs\node.exe")]
     [InlineData(@"C:\Windows\System32\cscript.exe")]
+    [InlineData(@"C:\Windows\System32\mshta.exe")]
+    [InlineData(@"C:\Windows\System32\rundll32.exe")]
+    [InlineData(@"C:\Windows\System32\regsvr32.exe")]
+    [InlineData(@"C:\Program Files\MSBuild\msbuild.exe")]
+    [InlineData(@"C:\Windows\System32\certutil.exe")]
+    [InlineData(@"C:\Windows\System32\wbem\wmic.exe")]
     public void LegacyPathOnlyEntryForACommandHost_IsInert(string target)
     {
         var entry = new ExecAllowlistEntry { Pattern = target };
@@ -200,6 +206,66 @@ public class ExecAllowlistArgBindingTests
         Assert.Null(ExecAllowlistMatcher.Match(
             [entry], Resolution(target), [target, "-c", "print(1)"]));
     }
+
+    // Regression guard for the catalog itself, not for any one name.
+    //
+    // D6 asks a purely historical question: would this exact provenance-less entry
+    // have been refused durable approval when it was written? So the quarantine set
+    // must reproduce the catalog exactly as it stood immediately before argument
+    // binding replaced it (e4ff61e7). An earlier revision of this branch restored only
+    // the interpreter half and silently dropped the code-host half, which would have
+    // converted previously denied entries into unconditional allows. Enumerating the
+    // catalog here makes that class of truncation fail loudly.
+    [Fact]
+    public void LegacyQuarantineCoversTheFullPreBindingCatalog()
+    {
+        string[] catalog =
+        [
+            "sh", "bash", "zsh", "dash", "ash", "ksh", "fish",
+            "cmd", "powershell", "pwsh",
+            "wsl", "cscript", "wscript",
+            "py", "pyw", "python", "pythonw", "pypy",
+            "node", "nodejs", "deno", "bun", "qjs",
+            "ruby", "jruby", "perl", "php", "lua", "luajit",
+            "java", "javaw", "jshell", "dotnet", "csi", "fsi", "fsharpi",
+            "r", "rscript", "tclsh", "wish", "groovy",
+            "mshta", "regsvr32", "rundll32",
+            "msbuild", "csc", "vbc", "dnx", "rcsi",
+            "installutil", "regasm", "regsvcs", "mavinject",
+            "msiexec", "certutil", "bitsadmin", "wmic",
+            "forfiles", "scriptrunner", "pcalua", "cmstp", "odbcconf",
+            "msdt", "ieexec", "presentationhost", "winrs", "hh", "msxsl", "xwizard",
+        ];
+
+        var missing = new List<string>();
+        foreach (var name in catalog)
+        {
+            if (!ExecCommandToken.IsLegacyQuarantinedHost(@"C:\somewhere\" + name + ".exe"))
+                missing.Add(name);
+        }
+
+        Assert.True(
+            missing.Count == 0,
+            "Names dropped from the pre-binding catalog: " + string.Join(", ", missing));
+    }
+
+    // Versioned interpreters were covered by the old catalog, so they stay covered.
+    [Theory]
+    [InlineData("python3")]
+    [InlineData("python3.12")]
+    [InlineData("pythonw3.11")]
+    [InlineData("pypy3.10")]
+    public void LegacyQuarantineCoversVersionedInterpreters(string name)
+        => Assert.True(ExecCommandToken.IsLegacyQuarantinedHost(@"C:\tools\" + name + ".exe"));
+
+    // The suffix must actually be a version. A different program that merely starts
+    // with an interpreter name is an ordinary executable and keeps working.
+    [Theory]
+    [InlineData("pythonish")]
+    [InlineData("python-wrapper")]
+    [InlineData("pypycache")]
+    public void LegacyQuarantineDoesNotCoverLookalikeNames(string name)
+        => Assert.False(ExecCommandToken.IsLegacyQuarantinedHost(@"C:\tools\" + name + ".exe"));
 
     // The quarantine is narrow on purpose: an ordinary program keeps working from a
     // provenance-less rule, because a human who wrote one meant it.
