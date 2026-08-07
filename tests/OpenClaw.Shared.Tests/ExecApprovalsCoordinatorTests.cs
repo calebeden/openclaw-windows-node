@@ -27,6 +27,22 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.System),
         "cmd.exe");
 
+    // Coordinator-level requests cannot carry a custom environment: the input validator
+    // denies a non-empty env with custom-env-not-supported, so PATH cannot be pinned per
+    // request and resolution always uses the process PATH. A bare payload name would then
+    // resolve to whatever the developer happens to have installed. On a machine with
+    // coreutils ahead of System32, "hostname.exe" resolves under "C:\Program Files\...",
+    // and the binder correctly refuses to pin a path containing a space, so the test would
+    // fail for an unrelated reason. Naming the payload absolutely keeps these tests about
+    // the coordinator's authorize-and-execute wiring. Bare-name PATH resolution is covered
+    // at the binder level, where env can be injected.
+    private static string SystemHostnamePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.System),
+        "hostname.exe");
+
+    // The same path escaped for embedding in a JSON string literal.
+    private static string SystemHostnameJson => SystemHostnamePath.Replace(@"\", @"\\");
+
     public ExecApprovalsCoordinatorTests(ITestOutputHelper output)
     {
         _dir = Path.Combine(Path.GetTempPath(), $"oca-coord-test-{Guid.NewGuid():N}");
@@ -1154,7 +1170,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             """{"version":1,"defaults":{"security":"allowlist","ask":"off"},"agents":{"main":{"allowlist":[{"pattern":"**/hostname.exe"}]}}}""");
 
         var result = await MakeCoordinator().HandleAsync(
-            Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+            Req($$"""{"command":["cmd.exe","/d","/s","/c","{{SystemHostnameJson}}"]}"""),
             "bound-hostname-stored");
 
         // A rule naming only the inner executable authorized the request, so the
@@ -1186,7 +1202,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             canPresent: AlwaysCanPresentEvaluator.Instance,
             prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowAlways))
             .HandleAsync(
-                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
+                Req($$"""{"command":["cmd.exe","/d","/s","/c","{{SystemHostnameJson}}"]}"""),
                 "bound-hostname-always");
 
         Assert.True(result.IsAllow);
@@ -1383,7 +1399,7 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         var result = await MakeCoordinator().HandleAsync(
             Req(JsonSerializer.Serialize(new
             {
-                command = new[] { cmdPath, "/d", "/s", "/c", "hostname.exe" }
+                command = new[] { cmdPath, "/d", "/s", "/c", SystemHostnamePath }
             })),
             "bound-absolute-cmd");
 

@@ -31,7 +31,7 @@ public class ExecReusableCommandBinderTests
             var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd,
-                env: null,
+                env: ExecTestPath.SystemOnly,
                 out var failure);
 
             Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
@@ -61,7 +61,7 @@ public class ExecReusableCommandBinderTests
             var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd,
-                env: null,
+                env: ExecTestPath.SystemOnly,
                 out var failure);
             Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
             Assert.NotNull(bound);
@@ -91,7 +91,7 @@ public class ExecReusableCommandBinderTests
         var bound = ExecReusableCommandBinder.TryBind(
             ["cmd.exe", "/d", "/s", "/c", "hostname.exe\t--first   --second"],
             cwd: null,
-            env: null,
+            env: ExecTestPath.SystemOnly,
             out var failure);
 
         Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
@@ -115,7 +115,7 @@ public class ExecReusableCommandBinderTests
         var bound = ExecReusableCommandBinder.TryBind(
             ["cmd.exe", "/d", "/s", "/c", "hostname.exe", "--version"],
             cwd: null,
-            env: null,
+            env: ExecTestPath.SystemOnly,
             out var failure);
 
         Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
@@ -215,9 +215,12 @@ public class ExecReusableCommandBinderTests
         {
             var rogueCmd = Path.Combine(directory.FullName, "cmd.exe");
             File.Copy(FindTestHostExecutable(), rogueCmd);
+            // The rogue directory is first so a bare "cmd.exe" would resolve to it, but
+            // the system directory still has to be reachable or the payload cannot
+            // resolve and the test would fail before reaching its actual claim.
             var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["PATH"] = directory.FullName,
+                ["PATH"] = directory.FullName + Path.PathSeparator + ExecTestPath.SystemDirectory,
                 ["PATHEXT"] = ".EXE",
             };
 
@@ -312,7 +315,7 @@ public class ExecReusableCommandBinderTests
             var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd,
-                env: null,
+                env: ExecTestPath.SystemOnly,
                 out var failure);
 
             Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
@@ -404,7 +407,7 @@ public class ExecReusableCommandBinderTests
             var bound = ExecReusableCommandBinder.TryBind(
                 ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
                 cwd: null,
-                env: null,
+                env: ExecTestPath.SystemOnly,
                 out var failure);
 
             Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
@@ -485,7 +488,7 @@ public class ExecReusableCommandBinderTests
     public void TrustedCarrier_KeepsTransportSeparateFromIdentity()
     {
         string[] command = ["cmd.exe", "/d", "/s", "/c", "hostname.exe"];
-        var bound = ExecReusableCommandBinder.TryBind(command, cwd: null, env: null);
+        var bound = ExecReusableCommandBinder.TryBind(command, cwd: null, env: ExecTestPath.SystemOnly);
 
         Assert.NotNull(bound);
         Assert.True(bound!.IsCarrierTransport);
@@ -520,7 +523,7 @@ public class ExecReusableCommandBinderTests
         var bound = ExecReusableCommandBinder.TryBind(
             ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
             cwd: null,
-            env: null);
+            env: ExecTestPath.SystemOnly);
 
         Assert.NotNull(bound);
         Assert.True(Path.IsPathFullyQualified(bound!.Argv[0]));
@@ -802,7 +805,7 @@ public class ExecReusableCommandBinderTests
         var bound = ExecReusableCommandBinder.TryBind(
             [cmdPath, "/d", "/s", "/c", "hostname.exe"],
             cwd: null,
-            env: null);
+            env: ExecTestPath.SystemOnly);
 
         Assert.NotNull(bound);
         Assert.EndsWith("hostname.exe", bound!.Argv[0], StringComparison.OrdinalIgnoreCase);

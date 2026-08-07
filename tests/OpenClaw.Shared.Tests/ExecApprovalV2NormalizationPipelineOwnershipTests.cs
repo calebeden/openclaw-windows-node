@@ -75,7 +75,9 @@ public class ExecApprovalV2NormalizationPipelineOwnershipTests
     public void BindableCommand_YieldsExactlyOneDurableIdentity()
     {
         var outcome = ExecApprovalV2Normalizer.Normalize(
-            MakeRequest(["cmd.exe", "/d", "/s", "/c", "hostname.exe"]));
+            MakeRequest(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                ExecTestPath.SystemOnly));
 
         Assert.True(outcome.IsResolved);
         Assert.NotNull(outcome.Identity!.ReusableCommand);
@@ -86,8 +88,10 @@ public class ExecApprovalV2NormalizationPipelineOwnershipTests
             outcome.Identity.AllowAlwaysPatterns[0]);
     }
 
-    private static ValidatedRunRequest MakeRequest(string[] argv) =>
-        new(argv, cwd: null, timeoutMs: 30_000, env: null, agentId: null, sessionKey: null);
+    private static ValidatedRunRequest MakeRequest(
+        string[] argv,
+        IReadOnlyDictionary<string, string>? env = null) =>
+        new(argv, cwd: null, timeoutMs: 30_000, env: env, agentId: null, sessionKey: null);
 
     private static string ReadNormalizerSource()
     {
