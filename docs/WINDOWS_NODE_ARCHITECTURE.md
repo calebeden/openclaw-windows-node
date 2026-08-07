@@ -583,6 +583,19 @@ Two invariants keep that split safe:
   executed carrier reconstructs the approved `rawCommand` exactly and no
   metacharacter can be introduced after approval.
 
+Because argv[1] onward is preserved verbatim, `cmd.exe` re-resolves the payload
+executable itself at launch, and it searches the working directory **before**
+PATH. The binder's resolver searches PATH only. A bare payload name that also
+exists in the working directory would therefore be authorized as the PATH copy
+and executed as the local one, so the binder refuses to bind it
+(`carrier-payload-executable-ambiguous`) rather than let the two resolvers
+disagree. An omitted working directory is not exempt: the child inherits the
+node's, which `cmd.exe` searches the same way.
+
+That refusal is a check at approval time against a directory that can change
+before launch, so it narrows rather than eliminates the substitution window. See
+the residual risk note below.
+
 Trust is deliberately narrow. A carrier is trusted only when argv[0] is the bare
 name `cmd`/`cmd.exe` or a fully qualified path under `System32`/`SysWOW64`. A
 renamed or relocated image named `cmd.exe` is refused for durable binding and
@@ -606,6 +619,29 @@ diagnostic (`carrier-payload-not-static`) rather than silently failing to bind.
 - Integrity binding is by resolved path only, with no content hash, inode, or
   signature check. This matches macOS `lastResolvedPath` behavior, and leaves the
   same time-of-check to time-of-use exposure between approval and launch.
+- An argument containing NUL is refused. NUL separates arguments inside a stored
+  `argPattern`, so `"a\0b"` would render identically to the two arguments
+  `"a"`, `"b"` and let a stored rule match a differently segmented command. It is
+  not representable in a Windows command line either, so refusing costs nothing.
+- A remote `system.execApprovals.set` may retain existing allowlist entries but
+  not alter them. Retention compares the whole authorization identity (pattern,
+  `argPattern`, and `source`) field by field. Comparing paths alone would let a
+  caller keep the executable while dropping the binding, silently widening a
+  generated rule into a path-only grant.
+
+##### Residual risk: working-directory substitution for bare carrier payloads
+
+For a bare (unqualified) payload name inside a trusted carrier, the executable
+the node authorizes and the executable `cmd.exe` launches are resolved at
+different times by different code. The ambiguity check above rejects the case
+where the working directory already shadows the name, but a writable working
+directory can gain a shadowing file between approval and launch.
+
+Closing this completely requires either pinning the payload to its absolute path
+inside the carrier, or refusing durable binding for bare payload names outright.
+The first changes what is transported under MXC; the second removes durable
+approval for the common `cmd /d /s /c tool.exe` shape. Until one is chosen, treat
+a node-writable working directory as in scope for this substitution.
 
 ### Location → Windows.Devices.Geolocation
 
