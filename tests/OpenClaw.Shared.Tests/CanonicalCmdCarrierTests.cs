@@ -208,6 +208,48 @@ public class CanonicalCmdCarrierTests
         Assert.True(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(pinned, request));
     }
 
+    // Regression: Path.HasExtension is true for any dotted name, so a versioned tool
+    // whose whole name is the PATHEXT stem ("python3.11" -> "python3.11.exe") used to
+    // bind successfully and then be rejected here, failing the run with an internal
+    // error instead of running the command the operator approved.
+    [Theory]
+    [InlineData("python3.11", @"C:\tools\python3.11.exe")]
+    [InlineData("clang-15.0", @"C:\tools\clang-15.0.exe")]
+    [InlineData("tool.v2", @"C:\tools\tool.v2.exe")]
+    public void PinnedCarrier_AcceptsAVersionedNameThatGainedItsResolvedExtension(
+        string requestName,
+        string resolvedPath)
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", $"{requestName} --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            resolvedPath,
+            out var pinned));
+
+        Assert.True(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(pinned, request));
+    }
+
+    // Relaxing the extension rule must not let pinning swap one program for another:
+    // only an appended extension is equivalent, never a different stem.
+    [Theory]
+    [InlineData("python3.11", @"C:\tools\python3.12.exe")]
+    [InlineData("tool", @"C:\tools\other.exe")]
+    [InlineData("tool.v2", @"C:\tools\tool.exe")]
+    public void PinnedCarrier_RejectsAPinnedNameWithADifferentStem(
+        string requestName,
+        string resolvedPath)
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", $"{requestName} --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            resolvedPath,
+            out var pinned));
+
+        Assert.False(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(pinned, request));
+    }
+
     private static string ReadMxcConfigBuilderSource()
     {
         var path = Path.Combine(

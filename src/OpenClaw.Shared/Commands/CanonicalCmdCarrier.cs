@@ -335,15 +335,23 @@ internal static class CanonicalCmdCarrier
         // pinning can sharpen an identity but never swap it for a different one. A
         // bare name legitimately gains its PATHEXT extension when it is resolved, so
         // "tool" pinned to "...\tool.exe" is the same identity spelled completely.
+        //
+        // The equivalence is "pinned name is the request name plus one appended
+        // extension", not "the request name looks extension-less". Path.HasExtension
+        // is true for any dotted name, so testing it here would reject legitimately
+        // versioned tools ("python3.11", "clang-15.0") whose whole name is the stem
+        // that PATHEXT resolution appended ".exe" to. Those bind successfully, so
+        // rejecting them only here would fail the run with an internal error instead
+        // of the prompt-only fallback the binder decided on. Stripping exactly one
+        // trailing extension cannot swap the stem, so this stays identity-preserving.
         var requestName = Path.GetFileName(requestTokens[0].Replace('/', '\\'));
         var pinnedName = Path.GetFileName(pinned);
         if (string.Equals(pinnedName, requestName, StringComparison.OrdinalIgnoreCase))
             return true;
 
-        return !Path.HasExtension(requestName)
-            && string.Equals(
-                Path.GetFileNameWithoutExtension(pinnedName),
-                requestName,
-                StringComparison.OrdinalIgnoreCase);
+        return string.Equals(
+            Path.GetFileNameWithoutExtension(pinnedName),
+            requestName,
+            StringComparison.OrdinalIgnoreCase);
     }
 }
