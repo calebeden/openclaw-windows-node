@@ -570,18 +570,18 @@ public class SystemCapability : NodeCapabilityBase
             // The fields are compared structurally rather than concatenated: argPattern
             // legitimately contains NUL, so any single-character join would let a caller
             // move a delimiter between fields and forge a match against a broader regex.
-            var currentIdentities = (currentAgent?.Allowlist ?? [])
-                .Where(entry => !string.IsNullOrWhiteSpace(entry.Pattern))
-                .Select(RemoteEntryIdentity)
-                .ToList();
+            var currentIdentities = new HashSet<(string, string?, string?)>(
+                (currentAgent?.Allowlist ?? [])
+                    .Where(entry => !string.IsNullOrWhiteSpace(entry.Pattern))
+                    .Select(RemoteEntryIdentity),
+                RemoteEntryIdentityComparer.Instance);
 
             foreach (var entry in agent.Allowlist ?? [])
             {
                 var pattern = entry.Pattern?.Trim();
                 if (string.IsNullOrWhiteSpace(pattern))
                     return "Empty allowlist patterns are not permitted.";
-                var candidate = RemoteEntryIdentity(entry);
-                if (!currentIdentities.Any(existing => RemoteIdentityEquals(existing, candidate)))
+                if (!currentIdentities.Contains(RemoteEntryIdentity(entry)))
                 {
                     return
                         $"Remote exec approval updates cannot add or change allowlist entries for agent '{agentId}'.";
@@ -596,14 +596,35 @@ public class SystemCapability : NodeCapabilityBase
         ExecAllowlistEntry entry)
         => (entry.Pattern?.Trim() ?? "", entry.ArgPattern, entry.Source);
 
-    // Pattern is a path, so it is compared case-insensitively. The argument binding and
-    // provenance must survive byte-for-byte: any change to either alters authorization.
-    private static bool RemoteIdentityEquals(
-        (string Pattern, string? ArgPattern, string? Source) left,
-        (string Pattern, string? ArgPattern, string? Source) right)
-        => string.Equals(left.Pattern, right.Pattern, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(left.ArgPattern, right.ArgPattern, StringComparison.Ordinal)
-            && string.Equals(left.Source, right.Source, StringComparison.Ordinal);
+    /// <summary>
+    /// Compares the fields separately so no redistribution of characters between them
+    /// can forge a match, and hashes them so a remote caller cannot force a linear scan
+    /// of the local allowlist by submitting many entries.
+    ///
+    /// Pattern is a path, so it is compared case-insensitively. The argument binding and
+    /// provenance must survive byte-for-byte: any change to either alters authorization.
+    /// </summary>
+    private sealed class RemoteEntryIdentityComparer
+        : IEqualityComparer<(string Pattern, string? ArgPattern, string? Source)>
+    {
+        internal static readonly RemoteEntryIdentityComparer Instance = new();
+
+        public bool Equals(
+            (string Pattern, string? ArgPattern, string? Source) left,
+            (string Pattern, string? ArgPattern, string? Source) right)
+            => string.Equals(left.Pattern, right.Pattern, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(left.ArgPattern, right.ArgPattern, StringComparison.Ordinal)
+                && string.Equals(left.Source, right.Source, StringComparison.Ordinal);
+
+        public int GetHashCode((string Pattern, string? ArgPattern, string? Source) value)
+        {
+            var hash = new HashCode();
+            hash.Add(value.Pattern, StringComparer.OrdinalIgnoreCase);
+            hash.Add(value.ArgPattern, StringComparer.Ordinal);
+            hash.Add(value.Source, StringComparer.Ordinal);
+            return hash.ToHashCode();
+        }
+    }
 
     private static string? ValidateDefinedPolicyEnums(ExecApprovalsFile file)
     {
