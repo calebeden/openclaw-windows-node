@@ -287,7 +287,6 @@ internal static class ExecReusableCommandBinder
             || extension.Equals(".com", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Stable diagnostic token for logs and prompts.</summary>
     private static bool ContainsNul(IReadOnlyList<string> argv)
     {
         for (var i = 0; i < argv.Count; i++)
@@ -298,6 +297,7 @@ internal static class ExecReusableCommandBinder
         return false;
     }
 
+    /// <summary>Stable diagnostic token for logs and prompts.</summary>
     internal static string DescribeFailure(BindFailure failure) => failure switch
     {
         BindFailure.None => "bound",

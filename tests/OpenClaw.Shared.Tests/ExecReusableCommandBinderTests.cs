@@ -37,7 +37,10 @@ public class ExecReusableCommandBinderTests
             Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
             Assert.NotNull(bound);
             Assert.True(bound!.IsCarrierTransport);
-            Assert.NotEqual(shadow, bound.Resolution.ResolvedPath, StringComparer.OrdinalIgnoreCase);
+            Assert.False(string.Equals(
+                shadow,
+                bound.Resolution.ResolvedPath,
+                StringComparison.OrdinalIgnoreCase));
             Assert.Equal(bound.Resolution.ResolvedPath, bound.ExecutionArgv[4], ignoreCase: true);
         }
         finally
@@ -97,7 +100,7 @@ public class ExecReusableCommandBinderTests
             bound!.Resolution.ResolvedPath + "\t--first   --second",
             bound.ExecutionArgv[4],
             ignoreCase: true);
-        Assert.Equal(["--first", "--second"], bound.Argv.Skip(1));
+        Assert.Equal(new[] { "--first", "--second" }, bound.Argv.Skip(1).ToArray());
         Assert.True(
             ExecApprovalsCoordinator.CarrierTransportMatchesRequest(
                 bound.ExecutionArgv,
@@ -491,7 +494,7 @@ public class ExecReusableCommandBinderTests
         // resolved absolute path. The switches in between are verbatim.
         Assert.True(Path.IsPathFullyQualified(bound.ExecutionArgv[0]));
         Assert.EndsWith("cmd.exe", bound.ExecutionArgv[0], StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(["/d", "/s", "/c"], bound.ExecutionArgv.Skip(1).Take(3));
+        Assert.Equal(new[] { "/d", "/s", "/c" }, bound.ExecutionArgv.Skip(1).Take(3).ToArray());
         Assert.Equal(bound.Argv[0], bound.ExecutionArgv[4], ignoreCase: true);
         Assert.Equal(5, bound.ExecutionArgv.Count);
     }

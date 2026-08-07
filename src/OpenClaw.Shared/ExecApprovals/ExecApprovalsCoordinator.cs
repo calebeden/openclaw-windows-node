@@ -432,9 +432,10 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
         // Approval identity and execution transport are separate. The identity is the
         // inner executable that was evaluated and shown; the transport is whatever the
         // binder said must actually run. For a canonical carrier those differ, and the
-        // carrier is preserved verbatim because it carries the environment bootstrap
-        // the sandbox depends on. Substituting the bound direct argv here would change
-        // what runs without changing what was approved.
+        // carrier is preserved (rather than replaced by the bound direct argv) because
+        // it carries the environment bootstrap the sandbox depends on. It is preserved
+        // with both launch-time resolutions pinned, and that equivalence is re-checked
+        // here rather than trusted from bind time.
         if (reusableCommand.IsCarrierTransport
             && !CarrierTransportMatchesRequest(reusableCommand.ExecutionArgv, identity.Command))
         {

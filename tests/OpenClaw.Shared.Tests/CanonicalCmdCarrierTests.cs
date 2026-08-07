@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using OpenClaw.Shared.Commands;
 using OpenClaw.Shared.ExecApprovals;
 using Xunit;
@@ -85,6 +86,95 @@ public class CanonicalCmdCarrierTests
             ["cmd.exe", "/d", "/s", "/c", "where.exe   hello"],
             out var payload));
         Assert.Equal("where.exe   hello", payload);
+    }
+
+    // ── Pinned carrier reconstruction (D7) ────────────────────────────────────
+
+    // The switches are copied from the request, not re-emitted from a template, so a
+    // request that used uppercase keeps uppercase and the executed command line is
+    // byte-identical to the approved one apart from the two pinned tokens.
+    [Fact]
+    public void PinnedCarrier_PreservesTheRequestsOwnSwitchSpelling()
+    {
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            ["CMD.EXE", "/D", "/S", "/C", "tool.exe --flag"],
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            @"C:\tools\tool.exe",
+            out var pinned));
+
+        Assert.Equal("/D", pinned[1]);
+        Assert.Equal("/S", pinned[2]);
+        Assert.Equal("/C", pinned[3]);
+        Assert.Equal(@"C:\tools\tool.exe --flag", pinned[4]);
+    }
+
+    // A relative carrier path is never accepted as the thing to execute: Windows would
+    // re-resolve it at launch, which is the resolution pinning exists to remove.
+    [Fact]
+    public void PinnedCarrier_RequiresAFullyQualifiedCarrierAndPayload()
+    {
+        Assert.False(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            ["cmd.exe", "/d", "/s", "/c", "tool.exe"],
+            "cmd.exe",
+            @"C:\tools\tool.exe",
+            out _));
+
+        Assert.False(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            ["cmd.exe", "/d", "/s", "/c", "tool.exe"],
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            "tool.exe",
+            out _));
+    }
+
+    [Fact]
+    public void PinnedCarrier_MatchesTheRequestItWasBuiltFrom()
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", "tool.exe --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            @"C:\tools\tool.exe",
+            out var pinned));
+
+        Assert.True(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(pinned, request));
+    }
+
+    // Anything beyond the two permitted differences is drift and must be refused at
+    // execution time even if it was somehow produced at bind time.
+    [Theory]
+    [InlineData(4, @"C:\tools\other.exe --flag")]
+    [InlineData(4, @"C:\tools\tool.exe --other")]
+    [InlineData(4, @"C:\tools\tool.exe --flag && whoami.exe")]
+    [InlineData(4, @"tool.exe --flag")]
+    [InlineData(3, "/k")]
+    public void PinnedCarrier_RejectsAnyOtherDifferenceFromTheRequest(int index, string replacement)
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", "tool.exe --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            @"C:\tools\tool.exe",
+            out var pinned));
+
+        var tampered = pinned.ToArray();
+        tampered[index] = replacement;
+
+        Assert.False(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(tampered, request));
+    }
+
+    // A bare payload name legitimately gains its PATHEXT extension when resolved, so
+    // "tool" pinned to "...\tool.exe" is the same identity spelled completely.
+    [Fact]
+    public void PinnedCarrier_AcceptsTheExtensionABareNameGainsWhenResolved()
+    {
+        string[] request = ["cmd.exe", "/d", "/s", "/c", "tool --flag"];
+        Assert.True(CanonicalCmdCarrier.TryBuildPinnedCarrier(
+            request,
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            @"C:\tools\tool.exe",
+            out var pinned));
+
+        Assert.True(CanonicalCmdCarrier.PinnedCarrierMatchesRequest(pinned, request));
     }
 
     private static string ReadMxcConfigBuilderSource()
