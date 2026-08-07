@@ -5505,7 +5505,11 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         OutputTokens = meta.OutputTokens ?? existing.OutputTokens,
                         ResponseTokens = meta.ResponseTokens ?? existing.ResponseTokens,
                         ContextPercent = meta.ContextPercent ?? existing.ContextPercent,
-                        AssistantContent = meta.AssistantContent ?? existing.AssistantContent
+                        AssistantContent = meta.AssistantContent is { } incomingContent
+                            ? ChatAssistantContentProjector.MergeLiveUpdate(
+                                existing.AssistantContent,
+                                incomingContent)
+                            : existing.AssistantContent
                     };
                 }
             }

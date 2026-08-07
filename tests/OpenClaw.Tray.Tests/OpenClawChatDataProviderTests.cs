@@ -8906,6 +8906,59 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task OnChatMessageReceived_StructuredFollowUp_PreservesLegacyMediaReference()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        await provider.LoadAsync();
+        snapshots.Clear();
+
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = string.Empty,
+            ContentParts =
+            [
+                new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Media,
+                    Media = new ChatMediaContentInfo
+                    {
+                        Kind = ChatMediaContentKind.Image,
+                        Source = ChatMediaContentSource.LegacyDirective,
+                        FileName = "banner.png",
+                    },
+                },
+            ],
+        });
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = string.Empty,
+            ContentParts =
+            [
+                new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Media,
+                    Media = new ChatMediaContentInfo
+                    {
+                        Kind = ChatMediaContentKind.Image,
+                        Source = ChatMediaContentSource.Structured,
+                        ArtifactId = "artifact-unavailable",
+                    },
+                },
+            ],
+        });
+
+        var timeline = snapshots[^1].Timelines["main"];
+        var entry = Assert.Single(timeline.Entries, item => item.Kind == ChatTimelineItemKind.Assistant);
+        var media = Assert.Single(provider.GetEntryMetadata("main")[entry.Id].AssistantContent!.Media);
+        Assert.Equal(ChatMediaContentSource.LegacyDirective, media.Reference.Source);
+        Assert.Equal("banner.png", media.DisplayName);
+    }
+
+    [Fact]
     public async Task OnChatMessageReceived_IdentifiedMediaOnlyRetransmit_DoesNotDuplicateEntry()
     {
         var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });

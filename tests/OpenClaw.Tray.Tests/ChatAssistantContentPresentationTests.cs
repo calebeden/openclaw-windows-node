@@ -137,6 +137,43 @@ public sealed class ChatAssistantContentPresentationTests
             plan.Media.Select(item => item.DisplayName));
     }
 
+    [Fact]
+    public void MergeLiveUpdate_DoesNotReplaceLegacyReferenceWithStructuredReference()
+    {
+        var legacy = ChatAssistantContentProjector.Project(
+        [
+            new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Media,
+                Media = new ChatMediaContentInfo
+                {
+                    Kind = ChatMediaContentKind.Image,
+                    Source = ChatMediaContentSource.LegacyDirective,
+                    FileName = "banner.png",
+                },
+            },
+        ])!;
+        var structured = ChatAssistantContentProjector.Project(
+        [
+            new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Media,
+                Media = new ChatMediaContentInfo
+                {
+                    Kind = ChatMediaContentKind.Image,
+                    Source = ChatMediaContentSource.Structured,
+                    ArtifactId = "artifact-unavailable",
+                },
+            },
+        ])!;
+
+        var merged = ChatAssistantContentProjector.MergeLiveUpdate(legacy, structured);
+
+        Assert.Equal(
+            ChatMediaContentSource.LegacyDirective,
+            Assert.Single(merged.Media).Reference.Source);
+    }
+
     private static ChatAssistantMediaPresentation Presentation(
         ChatMediaContentKind kind,
         string name) =>

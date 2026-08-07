@@ -63,6 +63,33 @@ internal static class ChatAssistantContentProjector
             Math.Max(0, renderedImages - MaximumInlineImages));
     }
 
+    public static ChatAssistantContentPresentation MergeLiveUpdate(
+        ChatAssistantContentPresentation? existing,
+        ChatAssistantContentPresentation incoming)
+    {
+        if (existing is null || existing.Media.Count != incoming.Media.Count)
+            return incoming;
+
+        var merged = incoming.Media.ToArray();
+        for (var index = 0; index < merged.Length; index++)
+        {
+            var previous = existing.Media[index];
+            var next = incoming.Media[index];
+            if (previous.Kind == next.Kind
+                && previous.Reference.Source == ChatMediaContentSource.LegacyDirective
+                && next.Reference.Source == ChatMediaContentSource.Structured
+                && (string.IsNullOrWhiteSpace(next.Reference.FileName)
+                    || string.Equals(
+                        previous.Reference.FileName,
+                        next.Reference.FileName,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                merged[index] = previous;
+            }
+        }
+        return new ChatAssistantContentPresentation(merged);
+    }
+
     private static string SafeDisplayName(ChatMediaContentInfo media)
     {
         if (!string.IsNullOrWhiteSpace(media.FileName))
