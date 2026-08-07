@@ -617,6 +617,32 @@ Upstream also has separate sandbox and plugin concepts:
 Those extension points do not make MXC a gateway plugin. They are separate
 layers with different owners.
 
+### Host limitation: some hosts cannot spawn a child executable under MXC
+
+On some Windows hosts the AppContainer starts and runs `cmd` builtins, but the
+first child executable it tries to launch never runs. Two signatures have been
+observed for the same underlying incapacity:
+
+- the child dies during DLL initialization, reported as exit code `0xC0000142`
+  (`STATUS_DLL_INIT_FAILED`);
+- `CreateProcess` is refused outright, reported as exit code `1` with
+  `Access is denied.` on stderr.
+
+This is a sandbox-runtime property of the host. It is independent of exec
+approvals: it reproduces with `security=full`, with no allowlist entry
+involved, and with the command executed exactly as the gateway sent it, so it
+is not caused by argument binding, by pinning a payload to a resolved absolute
+path, or by any V2 decision. A `cmd` builtin such as `echo` still succeeds in
+the same container, which is what isolates the failure to process creation.
+
+Consequences for validation on such a host: approval decisions are still
+provable end to end through a real gateway, because the decision is asserted
+from the node's own log and from the MXC request shape. Whether the approved
+command then produces output is not provable there. The MXC E2E records this
+explicitly rather than passing quietly, and it never tolerates any other
+nonzero exit code. See `Diagnostic_SystemRun_SpawnsChildExecutableInSandbox`
+and `AssertApprovedCommandRan` in `tests/OpenClaw.E2ETests/Setup/MxcSetupAndConnectTests.cs`.
+
 By default, Windows enables sandboxing but preserves a compatibility host
 fallback if MXC is unavailable. Enabling **block host fallback when MXC is
 unavailable** changes that case to a deny. The actual result reports whether

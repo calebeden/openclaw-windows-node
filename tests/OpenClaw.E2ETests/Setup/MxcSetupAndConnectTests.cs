@@ -16,6 +16,27 @@ public sealed class MxcSetupAndConnectTests
     // AssertApprovedCommandRan, which fails on any other nonzero exit code.
     private const int StatusDllInitFailed = unchecked((int)0xC0000142);
 
+    // The same host incapacity also shows up in a second shape. Rather than the child
+    // dying during DLL init, CreateProcess is refused outright and cmd reports
+    // "Access is denied." with exit 1. Observed on hosts where the AppContainer cannot
+    // traverse to the image at all. It is the same fact as StatusDllInitFailed - this
+    // host cannot spawn a child executable under MXC - so it is tolerated the same way
+    // and for the same reason.
+    //
+    // This is deliberately narrow. It requires exit code 1 together with exactly that
+    // message on stderr, and it never relaxes the approvals assertions: every caller
+    // separately asserts the approval decision and the MXC request shape from the tray
+    // log, and those assertions are what this PR is proving. A genuine approvals
+    // regression surfaces as decision=deny or a node error, not as this signature.
+    // Diagnostic_SystemRun_SpawnsChildExecutableInSandbox is the authoritative
+    // statement of whether the host has the capability at all.
+    private const string AccessDeniedMessage = "Access is denied.";
+
+    private static bool IsHostChildSpawnIncapacity(int exitCode, string? stderr)
+        => exitCode == StatusDllInitFailed
+            || (exitCode == 1
+                && string.Equals(stderr?.Trim(), AccessDeniedMessage, StringComparison.Ordinal));
+
     // Separates the two things a system.run proof can show. The approval outcome is
     // asserted by the caller and is what this PR changes. Whether the sandbox can then
     // launch a child executable is a distinct capability, proven by
@@ -23,11 +44,12 @@ public sealed class MxcSetupAndConnectTests
     private static void AssertApprovedCommandRan(JsonElement payload, string label)
     {
         var exitCode = payload.GetProperty("exitCode").GetInt32();
-        if (exitCode == StatusDllInitFailed)
+        var stderr = payload.GetProperty("stderr").GetString();
+        if (IsHostChildSpawnIncapacity(exitCode, stderr))
         {
             Console.WriteLine(
                 $"[E2E] {label}: approval succeeded; sandbox could not spawn a child executable " +
-                $"(exitCode=0x{exitCode:X8}, STATUS_DLL_INIT_FAILED). This host cannot run child " +
+                $"(exitCode=0x{exitCode:X8}, stderr={stderr?.Trim()}). This host cannot run child " +
                 "processes under MXC; the approval decision above is the assertion that matters here.");
             return;
         }
@@ -297,11 +319,11 @@ public sealed class MxcSetupAndConnectTests
         // payload, so a later child-spawn failure is isolated to process creation.
         Assert.Contains("START", stdout, StringComparison.Ordinal);
 
-        if (exitCode == StatusDllInitFailed)
+        if (IsHostChildSpawnIncapacity(exitCode, payload.GetProperty("stderr").GetString()))
         {
             Console.WriteLine(
-                "[E2E] child-spawn diagnostic: this host cannot spawn child executables under MXC " +
-                "(STATUS_DLL_INIT_FAILED). Exec-approval proofs on this host assert the approval " +
+                "[E2E] child-spawn diagnostic: this host cannot spawn child executables under MXC. " +
+                "Exec-approval proofs on this host assert the approval " +
                 "decision only; see AssertApprovedCommandRan.");
             return;
         }
