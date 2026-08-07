@@ -20,23 +20,22 @@ internal static class ExecCommandToken
         return name.ToLowerInvariant();
     }
 
-    // Returns the basename without a directly-executable image suffix (lowercased).
+    // Returns the basename without .exe suffix (lowercased).
     //
-    // .exe is stripped because that is how command identities are ordinarily spelled.
-    // .com is stripped for one narrow reason only: IsLegacyQuarantinedHost below has
-    // to recognize a provenance-less legacy entry that names `powershell.com`, which
-    // the old catalog would have refused, exactly as it recognizes `powershell.exe`.
-    // Without this, that entry would quietly become more permissive than it was when
-    // it was written. This is a classification detail of the transitional quarantine
-    // and says nothing about which images may be bound durably; that is decided
+    // Only .exe is stripped, and this must stay that way. This helper is shared by
+    // IsEnv, the shell-wrapper normalizer, the PowerShell and builtin classifiers,
+    // and IsLegacyQuarantinedHost below, so widening it silently changes what every
+    // one of those recognizes. An earlier revision of this branch also stripped .com
+    // so that a provenance-less entry naming `powershell.com` would be quarantined.
+    // That was wrong on its own terms: the historical catalog this quarantine
+    // reproduces (e4ff61e7) stripped .exe only and therefore never classified a .com
+    // spelling at all, so quarantining one now would invent a denial that never
+    // happened. Which images may be bound durably is a separate question, decided
     // solely by ExecReusableCommandBinder.IsBindableExecutable, which is .exe only.
     internal static string NormalizedBasename(string token)
     {
         var b = BasenameLower(token);
-        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            || b.EndsWith(".com", StringComparison.OrdinalIgnoreCase)
-            ? b[..^4]
-            : b;
+        return b.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? b[..^4] : b;
     }
 
     internal static bool IsEnv(string token) =>

@@ -304,18 +304,23 @@ public class ExecAllowlistArgBindingTests
             [legacy, sibling], Resolution(target), [target, "other.py"]));
     }
 
-    // Transitional quarantine only. A provenance-less legacy entry naming python.com
-    // must go inert exactly as one naming python.exe does, otherwise the change in
-    // model would silently upgrade a case the old catalog refused outright. This says
-    // nothing about bindability: .com is not durably bindable (see
+    // The quarantine reproduces the catalog exactly as it was (e4ff61e7), where
+    // NormalizedBasename stripped .exe only. `python.com` therefore never normalized
+    // to `python`, was never in the catalog, and was never refused, so a legacy entry
+    // naming it must keep working. An earlier revision of this branch quarantined it
+    // by teaching NormalizedBasename to strip .com as well, which invented a denial
+    // that never happened and changed IsEnv, the shell-wrapper normalizer, and the
+    // PowerShell and builtin classifiers as a side effect. Bindability is unaffected
+    // either way: .com is not durably bindable (see
     // ExecReusableCommandBinderTests.NativeComExtensionTarget_DoesNotBind).
     [Fact]
-    public void LegacyPathOnlyEntryForACommandHostWithComExtension_IsInert()
+    public void LegacyPathOnlyEntryForACommandHostWithComExtension_StillMatches()
     {
         const string target = @"C:\tools\python.com";
         var entry = new ExecAllowlistEntry { Pattern = target };
 
-        Assert.Null(ExecAllowlistMatcher.Match([entry], Resolution(target), [target, "-c", "1"]));
+        Assert.NotNull(ExecAllowlistMatcher.Match(
+            [entry], Resolution(target), [target, "-c", "1"]));
     }
 }
 

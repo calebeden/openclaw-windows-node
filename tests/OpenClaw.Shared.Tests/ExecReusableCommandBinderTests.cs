@@ -273,17 +273,17 @@ public class ExecReusableCommandBinderTests
         Assert.Null(ExecReusableCommandBinder.TryBind([target], cwd: null, env: null));
     }
 
-    // Transitional quarantine only. A provenance-less legacy entry that names
-    // powershell.com must go inert exactly as one naming powershell.exe does,
-    // otherwise the change in model would silently upgrade a case the old catalog
-    // refused outright. This is classification for quarantine, not bindability:
-    // NativeComExtensionTarget_DoesNotBind above is the bindability contract.
+    // The legacy quarantine reproduces the catalog as it actually was (e4ff61e7),
+    // where NormalizedBasename stripped .exe only. A .com spelling was therefore
+    // never classified as a command host and never refused, so it must not be
+    // quarantined now. Inventing a denial that never happened would be the same
+    // class of error as dropping one that did.
     [Theory]
     [InlineData("powershell.com")]
     [InlineData(@"C:\tools\python.com")]
     [InlineData("PYTHON.COM")]
-    public void ComExtension_QuarantinesAsTheSameCommandHostAsExe(string token)
-        => Assert.True(ExecCommandToken.IsLegacyQuarantinedHost(token));
+    public void ComExtension_IsNotLegacyQuarantined(string token)
+        => Assert.False(ExecCommandToken.IsLegacyQuarantinedHost(token));
 
     private static string RunCapturingStdout(IReadOnlyList<string> argv, string cwd)
     {
