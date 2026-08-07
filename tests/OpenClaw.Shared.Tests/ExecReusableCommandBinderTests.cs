@@ -114,8 +114,52 @@ public class ExecReusableCommandBinderTests
         Assert.Equal("argument-contains-nul", ExecReusableCommandBinder.DescribeFailure(failure));
     }
 
-    // The collision the rejection above prevents: without it, these two argv lists would
-    // produce the same persisted argument binding.
+    // The NUL-in-argument rejection has to apply to the carrier payload too, not only to
+    // a direct invocation. The carrier tokenizes a payload string into a fresh argv, so a
+    // NUL carried inside that string would otherwise reach the persisted argument
+    // pattern and collide with a differently segmented payload.
+    [Fact]
+    public void CarrierPayloadContainingNul_DoesNotBind()
+    {
+        ExecReusableCommandBinder.TryBind(
+            ["cmd.exe", "/d", "/s", "/c", "hostname.exe a\0b"],
+            cwd: null,
+            env: null,
+            out var failure);
+
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ArgumentContainsNul, failure);
+    }
+
+    // An omitted cwd is not the same as "no current directory": the child inherits this
+    // process's, and cmd.exe searches it before PATH just the same.
+    [Fact]
+    public void CarrierPayloadShadowedByInheritedDirectory_DoesNotBind()
+    {
+        var cwd = Directory.CreateTempSubdirectory("openclaw-inherited-shadow").FullName;
+        var original = Environment.CurrentDirectory;
+        try
+        {
+            File.WriteAllBytes(Path.Combine(cwd, "hostname.exe"), [0x4D, 0x5A]);
+            Environment.CurrentDirectory = cwd;
+
+            ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", "hostname.exe"],
+                cwd: null,
+                env: null,
+                out var failure);
+
+            Assert.Equal(
+                ExecReusableCommandBinder.BindFailure.CarrierPayloadExecutableAmbiguous,
+                failure);
+        }
+        finally
+        {
+            Environment.CurrentDirectory = original;
+            Directory.Delete(cwd, recursive: true);
+        }
+    }
+
+
     [Fact]
     public void NulBearingArgument_CannotShareABindingWithSplitArguments()
     {

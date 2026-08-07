@@ -270,6 +270,56 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
         Assert.Equal(baseHash, afterDoc.RootElement.GetProperty("hash").GetString());
     }
 
+    // The retained-entry identity must be compared structurally. If the fields were
+    // concatenated with a delimiter, a caller could move that delimiter between
+    // argPattern and source to forge a match while broadening the regex. argPattern
+    // legitimately contains NUL, so a NUL join is exactly the ambiguous case.
+    [IntegrationFact]
+    public async Task SystemExecApprovals_SetRejectsRedistributedIdentityFields()
+    {
+        using var beforeDoc = await _fixture.Client.CallToolExpectSuccessAsync("system.execApprovals.get");
+        var baseHash = beforeDoc.RootElement.GetProperty("hash").GetString()!;
+
+        var (isError, text) = await _fixture.Client.CallToolAcceptingFailureAsync(
+            "system.execApprovals.set",
+            new
+            {
+                baseHash,
+                file = new
+                {
+                    version = 1,
+                    defaults = new { security = "allowlist", ask = "off", askFallback = "deny", autoAllowSkills = false },
+                    agents = new Dictionary<string, object>
+                    {
+                        ["main"] = new
+                        {
+                            security = "allowlist",
+                            ask = "off",
+                            askFallback = "deny",
+                            autoAllowSkills = false,
+                            allowlist = new object[]
+                            {
+                                new { id = TrayAppFixture.SeededExecApprovalId, pattern = TrayAppFixture.SeededExecApprovalPattern },
+                                // Same characters as the seeded entry, but the anchor and
+                                // the NUL have been shifted out of argPattern into source,
+                                // leaving an unanchored (broader) regex behind.
+                                new
+                                {
+                                    id = TrayAppFixture.SeededBoundExecApprovalId,
+                                    pattern = TrayAppFixture.SeededBoundExecApprovalPattern,
+                                    argPattern = "^--version",
+                                    source = "$\u0000allow-always",
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+
+        Assert.True(isError, $"Expected a redistributed identity to be rejected; response: {text}");
+        Assert.Contains("cannot add or change allowlist entries", text, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ---- screen.* ----
     // Canonical OpenClaw protocol: screen.snapshot + screen.record only.
     // No screen.list / screen.capture (those were stale drift from the prior

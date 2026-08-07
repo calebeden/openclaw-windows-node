@@ -69,6 +69,18 @@ internal static class ExecReusableCommandBinder
             return null;
         }
 
+        // Checked before any carrier parsing so it covers every path that can reach a
+        // persisted binding. NUL is the argument separator inside a persisted argPattern,
+        // so an argument containing one is ambiguous: "a\0b" renders identically to the
+        // two arguments "a","b" and would let a stored rule match a differently segmented
+        // argv. It is also not representable in a Windows command line, so rejecting is
+        // fail-closed.
+        if (ContainsNul(command))
+        {
+            failure = BindFailure.ArgumentContainsNul;
+            return null;
+        }
+
         if (CanonicalCmdCarrier.IsCmdExecutable(command[0]))
         {
             if (!CanonicalCmdCarrier.TryGetTrustedCanonicalPayload(command, out var payload))
@@ -146,17 +158,13 @@ internal static class ExecReusableCommandBinder
             return null;
         }
 
-        // NUL is the argument separator in the persisted argPattern, so an argument
-        // containing one is ambiguous: "a\0b" renders identically to the two arguments
-        // "a","b" and would let a stored rule match a differently segmented argv. It is
-        // also not representable in a Windows command line, so rejecting is fail-closed.
-        for (var i = 0; i < argv.Count; i++)
+        // NUL is the argument separator in the persisted argPattern. Re-checked here
+        // because the carrier branch tokenizes a payload string into a fresh argv, so a
+        // token produced by that split has not passed the check at the top of TryBind.
+        if (ContainsNul(argv))
         {
-            if (argv[i].IndexOf('\0') >= 0)
-            {
-                failure = BindFailure.ArgumentContainsNul;
-                return null;
-            }
+            failure = BindFailure.ArgumentContainsNul;
+            return null;
         }
 
         if (ExecEnvInvocationUnwrapper.AnyWrapperHasModifiers(argv))
@@ -315,6 +323,16 @@ internal static class ExecReusableCommandBinder
     }
 
     /// <summary>Stable diagnostic token for logs and prompts.</summary>
+    private static bool ContainsNul(IReadOnlyList<string> argv)
+    {
+        for (var i = 0; i < argv.Count; i++)
+        {
+            if (argv[i].IndexOf('\0') >= 0)
+                return true;
+        }
+        return false;
+    }
+
     internal static string DescribeFailure(BindFailure failure) => failure switch
     {
         BindFailure.None => "bound",

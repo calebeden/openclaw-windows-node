@@ -428,14 +428,35 @@ internal static class ExecCommandResolver
         string? cwd,
         IReadOnlyDictionary<string, string>? env)
     {
-        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(cwd))
+        if (string.IsNullOrWhiteSpace(name))
             return false;
         // Only bare names are ambiguous. Anything carrying a separator is resolved
         // relative to the current directory by both cmd.exe and our resolver.
         if (name.IndexOfAny(['\\', '/']) >= 0)
             return false;
 
-        return FindInPath(name, [cwd], GetPathExtensions(env)) is not null;
+        // An omitted cwd does not mean "no current directory": the child inherits this
+        // process's, and cmd.exe searches it just the same. Fall back to it rather than
+        // treating the omission as safe.
+        var effectiveCwd = string.IsNullOrWhiteSpace(cwd)
+            ? TryGetProcessCurrentDirectory()
+            : cwd;
+        if (string.IsNullOrWhiteSpace(effectiveCwd))
+            return false;
+
+        return FindInPath(name, [effectiveCwd], GetPathExtensions(env)) is not null;
+    }
+
+    private static string? TryGetProcessCurrentDirectory()
+    {
+        try
+        {
+            return Environment.CurrentDirectory;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string? FindInPath(
