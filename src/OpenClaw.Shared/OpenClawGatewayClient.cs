@@ -73,6 +73,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private string? _operatorDeviceId;
     private string[] _grantedOperatorScopes = Array.Empty<string>();
     private string _connectAuthToken;
+    private string? _assistantMediaAuthToken;
     private bool _useV2Signature; // true after v3 signature rejected by gateway
 
     /// <summary>Set to true to skip v3 and use v2 signatures directly (for gateways that don't support v3).</summary>
@@ -275,6 +276,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         bool bootstrapPairAsNode = false,
         string? identityPath = null,
         bool ignoreStoredDeviceToken = false,
+        string? assistantMediaAuthToken = null,
         HttpMessageHandler? assistantMediaHandler = null)
         : base(gatewayUrl, token, logger)
     {
@@ -284,6 +286,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         _assistantMediaHttpClient = assistantMediaHandler is null
             ? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             : new HttpClient(assistantMediaHandler, disposeHandler: true);
+        SetAssistantMediaAuthToken(assistantMediaAuthToken);
         _currentGatewayUrl = gatewayUrl;
         var dataPath = identityPath ?? OpenClawAppIdentity.ResolveRoamingDataDirectory(
             Environment.GetEnvironmentVariable);
@@ -293,6 +296,15 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         _connectAuthToken = HasUsableOperatorDeviceToken ? _deviceIdentity.DeviceToken! : (_tokenIsBootstrapToken ? string.Empty : _token);
         _useV2Signature |= _tokenIsBootstrapToken && !HasUsableOperatorDeviceToken;
     }
+
+    /// <summary>
+    /// Updates the independently authorized credential used by assistant-media
+    /// HTTP requests. A null or blank value disables authenticated media HTTP.
+    /// </summary>
+    public void SetAssistantMediaAuthToken(string? token) =>
+        Volatile.Write(
+            ref _assistantMediaAuthToken,
+            string.IsNullOrWhiteSpace(token) ? null : token);
 
     public async Task DisconnectAsync()
     {

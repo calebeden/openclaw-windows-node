@@ -75,8 +75,9 @@ public sealed class OpenClawGatewayClientAssistantMediaTests
             BytesResponse([1, 2, 3, 4], "image/png"));
         using var client = new OpenClawGatewayClient(
             server.WebSocketUrl,
-            "test-token",
+            "paired-device-token",
             identityPath: identity.Path,
+            assistantMediaAuthToken: "shared-http-token",
             assistantMediaHandler: handler);
         await client.ConnectAsync();
 
@@ -95,13 +96,82 @@ public sealed class OpenClawGatewayClientAssistantMediaTests
         Assert.Equal(2, handler.Requests.Count);
         Assert.All(
             handler.Requests,
-            request => Assert.Equal("Bearer test-token", request.Authorization));
+            request => Assert.Equal("shared-http-token", request.AuthorizationParameter));
         Assert.Contains("meta=1", handler.Requests[0].Uri.Query, StringComparison.Ordinal);
         Assert.Contains("mediaTicket=ticket-1", handler.Requests[1].Uri.Query, StringComparison.Ordinal);
         Assert.Contains(
             "source=%2Fhome%2Fopenclaw%2Fprivate%2Fbanner.png",
             handler.Requests[1].Uri.Query,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResolveLegacyMedia_WithoutExplicitHttpCredential_DoesNotUseWebSocketToken()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("assistant-media-");
+        await server.StartAsync();
+        var handler = new SequentialMediaHandler(
+            JsonResponse(
+                """{"available":true,"mimeType":"image/png","sizeBytes":4,"mediaTicket":"ticket-1"}"""),
+            BytesResponse([1, 2, 3, 4], "image/png"));
+        using var client = new OpenClawGatewayClient(
+            server.WebSocketUrl,
+            "paired-device-token",
+            identityPath: identity.Path,
+            assistantMediaHandler: handler);
+        await client.ConnectAsync();
+
+        var result = await client.ResolveAssistantMediaAsync(
+            "main",
+            new ChatMediaContentInfo
+            {
+                Kind = ChatMediaContentKind.Image,
+                Source = ChatMediaContentSource.LegacyDirective,
+                GatewaySource = "/home/openclaw/private/banner.png",
+            });
+
+        Assert.Equal(AssistantMediaResolutionStatus.Ready, result.Status);
+        Assert.All(handler.Requests, request => Assert.Null(request.AuthorizationParameter));
+    }
+
+    [Fact]
+    public async Task ResolveLegacyMedia_UsesUpdatedHttpCredential()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("assistant-media-");
+        await server.StartAsync();
+        var handler = new SequentialMediaHandler(
+            JsonResponse(
+                """{"available":true,"mimeType":"image/png","sizeBytes":4,"mediaTicket":"ticket-1"}"""),
+            BytesResponse([1, 2, 3, 4], "image/png"),
+            JsonResponse(
+                """{"available":true,"mimeType":"image/png","sizeBytes":4,"mediaTicket":"ticket-2"}"""),
+            BytesResponse([1, 2, 3, 4], "image/png"));
+        using var client = new OpenClawGatewayClient(
+            server.WebSocketUrl,
+            "paired-device-token",
+            identityPath: identity.Path,
+            assistantMediaAuthToken: "shared-token-1",
+            assistantMediaHandler: handler);
+        await client.ConnectAsync();
+        var media = new ChatMediaContentInfo
+        {
+            Kind = ChatMediaContentKind.Image,
+            Source = ChatMediaContentSource.LegacyDirective,
+            GatewaySource = "/home/openclaw/private/banner.png",
+        };
+
+        await client.ResolveAssistantMediaAsync("main", media);
+        client.SetAssistantMediaAuthToken("shared-token-2");
+        await client.ResolveAssistantMediaAsync("main", media);
+
+        Assert.All(
+            handler.Requests.Take(2),
+            request => Assert.Equal("shared-token-1", request.AuthorizationParameter));
+        Assert.All(
+            handler.Requests.Skip(2),
+            request => Assert.Equal("shared-token-2", request.AuthorizationParameter));
     }
 
     [Fact]
@@ -191,11 +261,15 @@ public sealed class OpenClawGatewayClientAssistantMediaTests
         {
             Requests.Add(new CapturedRequest(
                 request.RequestUri!,
-                request.Headers.Authorization?.ToString()));
+                request.Headers.Authorization?.ToString(),
+                request.Headers.Authorization?.Parameter));
             var index = Interlocked.Increment(ref _nextResponse) - 1;
             return Task.FromResult(responses[index]);
         }
     }
 
-    private sealed record CapturedRequest(Uri Uri, string? Authorization);
+    private sealed record CapturedRequest(
+        Uri Uri,
+        string? Authorization,
+        string? AuthorizationParameter);
 }

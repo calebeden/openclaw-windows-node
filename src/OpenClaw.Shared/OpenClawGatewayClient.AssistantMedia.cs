@@ -230,8 +230,11 @@ public partial class OpenClawGatewayClient
     {
         var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(accept));
-        if (!string.IsNullOrWhiteSpace(_connectAuthToken))
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _connectAuthToken);
+        var authToken = Volatile.Read(ref _assistantMediaAuthToken);
+        if (!string.IsNullOrWhiteSpace(authToken))
+            request.Headers.Authorization = new AuthenticationHeaderValue(
+                "Bearer",
+                authToken);
         return request;
     }
 
