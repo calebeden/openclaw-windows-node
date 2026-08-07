@@ -53,11 +53,17 @@ internal static class ExecAllowlistMatcher
     //     any arguments, which is a loosening nobody asked for. The entry is left on
     //     disk untouched and is not migrated; only an explicit Allow always writes an
     //     argument-bound sibling, and that sibling then matches normally.
-    //   - A generated entry carries source "allow-always". Generated entries have
-    //     bound their arguments since argument binding was introduced, so one that
-    //     lacks an argPattern is an older record whose arguments were never pinned.
-    //     Honoring it would let a rule approved for one command authorize any later
-    //     command that reuses the same executable, so it is skipped instead.
+    //   - A generated entry carries a source, normally "allow-always". Generated
+    //     entries have bound their arguments since argument binding was introduced, so
+    //     one that lacks an argPattern is an older record whose arguments were never
+    //     pinned. Honoring it would let a rule approved for one command authorize any
+    //     later command that reuses the same executable, so it is skipped instead.
+    //     Any non-empty source is treated this way, not just the exact spelling this
+    //     node writes. A source that is cased differently, padded, or otherwise
+    //     unrecognized still means "a generator produced this entry", so falling
+    //     through to the path-only branch would let a corrupted or foreign marker
+    //     widen a rule that was never meant to be path-only. Provenance is only
+    //     absent when the source is genuinely empty.
     //
     // A path-only match is only returned when no argument-bound entry matched, so a
     // precise rule always wins over a broad one.
@@ -80,10 +86,12 @@ internal static class ExecAllowlistMatcher
 
             if (string.IsNullOrEmpty(entry.ArgPattern))
             {
-                if (string.Equals(entry.Source, AllowAlwaysSource, System.StringComparison.Ordinal))
+                // Fail closed on any provenance marker: an entry that records where it
+                // came from is a generated entry, and a generated entry with no
+                // argPattern lost its binding.
+                if (!string.IsNullOrWhiteSpace(entry.Source))
                     continue;
-                if (string.IsNullOrEmpty(entry.Source)
-                    && ExecCommandToken.IsLegacyQuarantinedHost(target))
+                if (ExecCommandToken.IsLegacyQuarantinedHost(target))
                     continue;
                 pathOnlyMatch ??= entry;
                 continue;

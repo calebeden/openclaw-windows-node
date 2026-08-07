@@ -50,10 +50,22 @@ public sealed class ExecAllowlistEntry
 
     // Human-readable command this rule was created from. Display and audit only:
     // never an input to matching, so a rewritten commandText cannot widen a rule.
+    //
+    // This does mean approved argument text lands in the approvals file. That is
+    // inherent to the model rather than a property of this field: ArgPattern above
+    // encodes the exact argv and is load-bearing for authorization, so redacting
+    // command text here would not keep arguments off disk, it would only make the
+    // file unreadable to an operator auditing what they approved. The file is also
+    // returned verbatim by system.execApprovals.get, whose hash is the concurrency
+    // token for a matching set, so the returned bytes cannot be filtered without
+    // breaking that read-modify-write contract. Operators who must keep secrets out
+    // of the file should not pass them as command arguments.
     public string? CommandText { get; set; }
 
     public double? LastUsedAt { get; set; }
     public string? LastResolvedPath { get; set; }
+
+    // Last command observed for this rule. Same disclosure note as CommandText.
     public string? LastUsedCommand { get; set; }
 }
 

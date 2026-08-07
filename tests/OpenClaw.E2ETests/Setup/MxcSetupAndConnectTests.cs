@@ -126,17 +126,24 @@ public sealed class MxcSetupAndConnectTests
         Console.WriteLine($"[E2E] MXC result diagnostic: {resultLog}");
     }
 
+    // whoami.exe, not hostname.exe. Both are System32 utilities, but hostname.exe is
+    // commonly shadowed on a developer PATH (coreutils ships one), and a shadowing copy
+    // usually lives in a directory the sandbox does not grant. That turns an approvals
+    // proof into a proof about the host's PATH. whoami.exe has no common shadow, so the
+    // executable this proof resolves is the one it names.
+    private const string ProofExecutable = "whoami.exe";
+
     [MxcE2EFact]
-    public async Task RealGateway_SystemRun_UsesBoundHostnameAllowlistRule()
+    public async Task RealGateway_SystemRun_UsesBoundExecutableAllowlistRule()
     {
         await AssertPrimaryTrayReadyAndGatewayCliHealthyAsync();
-        await SetExecApprovalForBoundHostnameProofAsync();
+        await SetExecApprovalForBoundExecutableProofAsync();
 
         var gateway = _fixture.ReadActiveGatewayRecord();
         var env = GatewayTokenEnv(gateway.SharedGatewayToken);
         var nodeId = _fixture.ReadActiveGatewayDeviceId();
         var logCursor = GetTrayLogCursor();
-        const string commandText = "hostname.exe";
+        const string commandText = ProofExecutable;
         var invokeParams = JsonSerializer.Serialize(new
         {
             nodeId,
@@ -157,7 +164,7 @@ public sealed class MxcSetupAndConnectTests
             env,
             inputViaStdin: true);
 
-        AssertCommandSucceeded(invoke, "invoke allowlisted hostname through real gateway");
+        AssertCommandSucceeded(invoke, "invoke allowlisted executable through real gateway");
         using var invokeDoc = JsonDocument.Parse(ExtractJsonObject(invoke.Stdout));
         if (invokeDoc.RootElement.TryGetProperty("ok", out var ok))
         {
@@ -184,10 +191,10 @@ public sealed class MxcSetupAndConnectTests
             "contained=True",
             "shell=<direct-argv>");
 
-        AssertApprovedCommandRan(payload, nameof(RealGateway_SystemRun_UsesBoundHostnameAllowlistRule));
+        AssertApprovedCommandRan(payload, nameof(RealGateway_SystemRun_UsesBoundExecutableAllowlistRule));
 
-        Console.WriteLine($"[E2E] bound hostname approval: {approvalLog}");
-        Console.WriteLine($"[E2E] bound hostname MXC request: {requestLog}");
+        Console.WriteLine($"[E2E] bound executable approval: {approvalLog}");
+        Console.WriteLine($"[E2E] bound executable MXC request: {requestLog}");
     }
 
     // The gateway forwards command text already tokenized across several argv
@@ -197,13 +204,13 @@ public sealed class MxcSetupAndConnectTests
     public async Task RealGateway_SystemRun_UsesBoundAllowlistRuleForMultiElementTail()
     {
         await AssertPrimaryTrayReadyAndGatewayCliHealthyAsync();
-        await SetExecApprovalForBoundHostnameProofAsync();
+        await SetExecApprovalForBoundExecutableProofAsync();
 
         var gateway = _fixture.ReadActiveGatewayRecord();
         var env = GatewayTokenEnv(gateway.SharedGatewayToken);
         var nodeId = _fixture.ReadActiveGatewayDeviceId();
         var logCursor = GetTrayLogCursor();
-        const string commandText = "where.exe hostname.exe";
+        const string commandText = "where.exe " + ProofExecutable;
         var invokeParams = JsonSerializer.Serialize(new
         {
             nodeId,
@@ -211,7 +218,7 @@ public sealed class MxcSetupAndConnectTests
             @params = new
             {
                 // Tail split across elements, as node-invoke-system-run-approval fixtures do.
-                command = new[] { "cmd.exe", "/d", "/s", "/c", "where.exe", "hostname.exe" },
+                command = new[] { "cmd.exe", "/d", "/s", "/c", "where.exe", ProofExecutable },
                 rawCommand = commandText,
                 timeoutMs = SystemRunProofTimeoutMs
             },
@@ -255,7 +262,7 @@ public sealed class MxcSetupAndConnectTests
         var gateway = _fixture.ReadActiveGatewayRecord();
         var env = GatewayTokenEnv(gateway.SharedGatewayToken);
         var nodeId = _fixture.ReadActiveGatewayDeviceId();
-        const string commandText = "echo START && hostname.exe";
+        const string commandText = "echo START && " + ProofExecutable;
         var invokeParams = JsonSerializer.Serialize(new
         {
             nodeId,
@@ -461,7 +468,7 @@ public sealed class MxcSetupAndConnectTests
         Console.WriteLine($"[E2E] V2 exec approvals set LOCALLY to full at {approvalsPath} (remote full is guarded; MXC sandbox enforces containment)");
     }
 
-    private async Task SetExecApprovalForBoundHostnameProofAsync()
+    private async Task SetExecApprovalForBoundExecutableProofAsync()
     {
         using var policy = await _fixture.Client!.CallToolExpectSuccessAsync("system.execApprovals.get");
         var approvalsPath = policy.RootElement.GetProperty("path").GetString();
@@ -490,7 +497,7 @@ public sealed class MxcSetupAndConnectTests
                         new
                         {
                             id = Guid.NewGuid(),
-                            pattern = "**/hostname.exe"
+                            pattern = "**/" + ProofExecutable
                         },
                         new
                         {
@@ -520,9 +527,9 @@ public sealed class MxcSetupAndConnectTests
             .GetProperty("allowlist");
         Assert.Contains(
             allowlist.EnumerateArray(),
-            entry => entry.GetProperty("pattern").GetString() == "**/hostname.exe");
+            entry => entry.GetProperty("pattern").GetString() == "**/" + ProofExecutable);
         Console.WriteLine(
-            $"[E2E] V2 exec approvals set LOCALLY to allowlist hostname.exe at {approvalsPath}");
+            $"[E2E] V2 exec approvals set LOCALLY to allowlist {ProofExecutable} at {approvalsPath}");
     }
 
     private TrayLogCursor GetTrayLogCursor()

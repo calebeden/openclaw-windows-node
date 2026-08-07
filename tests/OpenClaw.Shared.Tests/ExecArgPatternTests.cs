@@ -143,6 +143,68 @@ public class ExecAllowlistArgBindingTests
             [@"C:\Windows\System32\hostname.exe", "--anything"]));
     }
 
+    // Provenance is what separates a deliberate path-only rule from a generated one
+    // that lost its binding, so the check must not depend on the exact spelling this
+    // node happens to write. A marker that is cased differently, padded, or written by
+    // some other producer still means a generator made the entry.
+    [Theory]
+    [InlineData("ALLOW-ALWAYS")]
+    [InlineData("Allow-Always")]
+    [InlineData("allow-always ")]
+    [InlineData(" allow-always")]
+    [InlineData("generated")]
+    [InlineData("some-future-source")]
+    public void GeneratedEntryWithNoArgumentBinding_IsNotHonoredForAnySourceSpelling(
+        string source)
+    {
+        var entry = new ExecAllowlistEntry
+        {
+            Pattern = @"C:\Windows\System32\hostname.exe",
+            Source = source,
+        };
+
+        Assert.Null(ExecAllowlistMatcher.Match(
+            [entry],
+            Resolution(@"C:\Windows\System32\hostname.exe"),
+            [@"C:\Windows\System32\hostname.exe", "--anything"]));
+    }
+
+    // Whitespace is not provenance. An entry whose source is blank was never stamped by
+    // a generator, so it keeps hand-written path-only semantics.
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void EntryWithBlankSourceAndNoArgumentBinding_IsStillHandWritten(string source)
+    {
+        var entry = new ExecAllowlistEntry
+        {
+            Pattern = @"C:\Windows\System32\hostname.exe",
+            Source = source,
+        };
+
+        Assert.NotNull(ExecAllowlistMatcher.Match(
+            [entry],
+            Resolution(@"C:\Windows\System32\hostname.exe"),
+            [@"C:\Windows\System32\hostname.exe", "--anything"]));
+    }
+
+    // A generated entry that lost its binding must not gain path-only reach just
+    // because its target is an ordinary program the legacy catalog never quarantined.
+    [Fact]
+    public void GeneratedEntryWithNoArgumentBinding_IsNotHonoredEvenForAnUnquarantinedHost()
+    {
+        var entry = new ExecAllowlistEntry
+        {
+            Pattern = @"C:\Windows\System32\where.exe",
+            Source = "UNKNOWN-PRODUCER",
+        };
+
+        Assert.Null(ExecAllowlistMatcher.Match(
+            [entry],
+            Resolution(@"C:\Windows\System32\where.exe"),
+            [@"C:\Windows\System32\where.exe", "hostname.exe"]));
+    }
+
     [Fact]
     public void BoundEntry_AuthorizesOnlyTheApprovedArguments()
     {

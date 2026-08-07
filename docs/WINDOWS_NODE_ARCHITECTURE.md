@@ -547,7 +547,10 @@ Authorization consequences follow upstream `matchAllowlist` exactly:
 
 - A **generated** entry with no `argPattern` never matches. It is skipped rather
   than widened to a path-only grant, so a truncated or hand-edited rule fails
-  closed.
+  closed. Any non-empty `source` counts as generated, not just the exact marker
+  this node writes, so a differently cased, padded, or foreign marker cannot fall
+  through and widen the rule. Provenance is absent only when `source` is empty or
+  whitespace.
 - A **path-only** entry authorizes its executable regardless of arguments. That is
   the operator writing a deliberately broad rule by hand, and it is honored as
   written, with one carve-out described under "Legacy quarantine" below. Path-only
