@@ -586,12 +586,8 @@ through to a prompt.
 The quarantined set is a verbatim copy of the catalog as it stood immediately before
 argument binding replaced it, because the question it answers is purely historical:
 would this exact entry have been refused when it was written? It must not be curated,
-pruned, or extended. That also fixes its matching rules. The old catalog compared a
-basename with only a `.exe` suffix stripped, so a `.com` spelling never normalized to
-a catalog name and was never refused; a legacy entry naming one therefore keeps
-working. Adding a `.com` spelling to the quarantine would invent a denial that never
-happened, and would change what `IsEnv`, the shell-wrapper normalizer, and the
-PowerShell and builtin classifiers recognize as a side effect.
+pruned, or extended, and its matching rules are fixed for the same reason: it compares
+a basename with only a `.exe` suffix stripped, exactly as the original did.
 
 The entry is not deleted and not migrated. The only way to make such a host reusable
 is an explicit Allow always, which writes an argument-bound sibling carrying `source`
