@@ -433,9 +433,35 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         Func<ChatTimelineItem, Task> toggleSpeechAsync,
         Action<string, bool> setEntryHovered)
     {
-        var message = BuildSafeMarkdown(entry.Text);
+        var content = new List<Element>();
+        ChatEntryMetadata? metadata = null;
+        if (!string.IsNullOrWhiteSpace(entry.Text))
+            content.Add(BuildSafeMarkdown(entry.Text));
+        if (row.Props.Timeline.EntryMetadata?.TryGetValue(entry.Id, out var resolvedMetadata) == true)
+            metadata = resolvedMetadata;
+        if (metadata?.AssistantContent is { Media.Count: > 0 } assistantContent)
+        {
+            var renderPlan = ChatAssistantContentProjector.BuildRenderPlan(assistantContent.Media);
+            content.AddRange(renderPlan.Media.Select(media =>
+                ChatAssistantMediaRenderer.Render(
+                    media,
+                    row.Props.Timeline.SessionId,
+                    row.Props.Timeline.ResolveAssistantMediaAsync)));
+            if (renderPlan.OmittedImages > 0)
+            {
+                content.Add(TextBlock(string.Format(
+                        ChatAssistantMediaRenderer.LocalizedOrDefault(
+                            "Chat_AssistantMedia_ImagesOmitted",
+                            "{0} more images not shown"),
+                        renderPlan.OmittedImages))
+                    .FontSize(11)
+                    .Foreground(Theme.SecondaryText));
+            }
+        }
+        if (content.Count == 0)
+            content.Add(BuildSafeMarkdown(string.Empty));
 
-        var bubble = Border(message)
+        var bubble = Border(VStack(8, content.ToArray()))
             .Background(BrushFor(
                 "SubtleFillColorSecondaryBrush",
                 Color.FromArgb(0x24, 0x80, 0x80, 0x80)))
@@ -469,7 +495,25 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                     .Grid(column: 1))
             .Margin(20, row.IsAssistantRunStart ? 6 : 1, 72, row.IsAssistantRunEnd ? 6 : 1)
             .HAlign(HorizontalAlignment.Stretch)
-            .AutomationName(entry.Text ?? string.Empty);
+            .AutomationName(BuildAccessibleAssistantText(entry.Text, metadata?.AssistantContent));
+    }
+
+    private static string BuildAccessibleAssistantText(
+        string? text,
+        ChatAssistantContentPresentation? content)
+    {
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(text))
+            lines.Add(text);
+        if (content is not null)
+        {
+            var attachmentLabel = ChatAssistantMediaRenderer.LocalizedOrDefault(
+                "Chat_AssistantMedia_MediaAttachment",
+                "Media attachment");
+            lines.AddRange(content.Media.Select(media =>
+                $"{ChatAssistantMediaRenderer.DisplayName(media)}. {attachmentLabel}"));
+        }
+        return string.Join('\n', lines);
     }
 
     private static Element BuildAssistantAvatarSlot(ReactorTimelineRow row)

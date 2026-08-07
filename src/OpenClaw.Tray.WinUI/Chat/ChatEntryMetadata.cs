@@ -64,6 +64,10 @@ namespace OpenClawTray.Chat;
 /// Structured attachment presentation metadata. Gateway references never carry
 /// preview cache keys.
 /// </param>
+/// <param name="AssistantContent">
+/// Renderer-safe assistant media presentation. Transport references remain
+/// opaque and are never encoded into timeline text.
+/// </param>
 public sealed record ChatEntryMetadata(
     DateTimeOffset? Timestamp,
     string? Model,
@@ -80,4 +84,5 @@ public sealed record ChatEntryMetadata(
     long? CompactionTokensAfter = null,
     bool IsLocalQueuedSend = false,
     string? LocalQueuedMessageId = null,
-    IReadOnlyList<ChatAttachmentPresentation>? Attachments = null);
+    IReadOnlyList<ChatAttachmentPresentation>? Attachments = null,
+    ChatAssistantContentPresentation? AssistantContent = null);

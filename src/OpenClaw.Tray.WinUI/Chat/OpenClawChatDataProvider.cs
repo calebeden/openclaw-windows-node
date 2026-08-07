@@ -1213,7 +1213,10 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         OpenClawSeq: msg.OpenClawSeq,
                         OpenClawKind: msg.OpenClawKind,
                         CompactionTokensBefore: msg.CompactionTokensBefore,
-                        CompactionTokensAfter: msg.CompactionTokensAfter);
+                        CompactionTokensAfter: msg.CompactionTokensAfter,
+                        AssistantContent: roleLower == "assistant"
+                            ? ChatAssistantContentProjector.Project(replayPart.AssistantContentParts)
+                            : null);
 
                     // Cap per-message text up front so heuristics, logging,
                     // and the reducer all see the same bounded value
@@ -1235,6 +1238,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     }
                     var hasStructuredToolContent = replayPart.ToolContent.Count > 0;
                     var hasUserAttachments = msgMeta.Attachments is { Count: > 0 };
+                    var hasAssistantMedia = msgMeta.AssistantContent is { Media.Count: > 0 };
 
                     // Check if this user message was aborted (persisted __openclaw.id match)
                     if (roleLower == "user")
@@ -1268,7 +1272,13 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         continue;
                     }
 
-                    if (string.IsNullOrEmpty(text) && !hasStructuredToolContent && !hasUserAttachments) continue;
+                    if (string.IsNullOrEmpty(text)
+                        && !hasStructuredToolContent
+                        && !hasUserAttachments
+                        && !hasAssistantMedia)
+                    {
+                        continue;
+                    }
 
                     // Diagnostic: log shape (role + length + heuristic flags) only.
                     // Never log the message text — see HIGH 4 logging audit.
@@ -1276,7 +1286,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     var isSys  = NativeToolProjector.LooksLikeSystemControlNote(text);
                     Logger.Debug($"[ChatHistory] role='{roleLower}' len={text.Length} flat={isFlat} sys={isSys}");
 
-                    if (!string.IsNullOrEmpty(text) || (roleLower == "user" && hasUserAttachments))
+                    if (!string.IsNullOrEmpty(text)
+                        || (roleLower == "user" && hasUserAttachments)
+                        || (roleLower == "assistant" && hasAssistantMedia))
                     {
                         switch (roleLower)
                         {
@@ -2283,6 +2295,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         }
     }
 
+    internal Task<AssistantMediaResolutionResult> ResolveAssistantMediaAsync(
+        string sessionKey,
+        ChatMediaContentInfo media,
+        CancellationToken cancellationToken) =>
+        _bridge.ResolveAssistantMediaAsync(sessionKey, media, cancellationToken);
+
     // ── Event handlers ──
 
     private void OnStatusChanged(object? sender, ConnectionStatus status)
@@ -2876,7 +2894,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             return;
         if (ChatMessageInfo.IsSilentAssistantDirective(roleLower, message.Text))
             return;
-        if (string.IsNullOrEmpty(message.Text))
+        var assistantContent = ChatAssistantContentProjector.Project(message.ContentParts);
+        if (string.IsNullOrEmpty(message.Text) && assistantContent is null)
             return;
 
         var threadId = message.SessionKey;
@@ -2884,11 +2903,16 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         AssistantQueueFrameDisposition assistantDisposition;
         lock (_gate)
         {
-            assistantDisposition = ClassifyAssistantQueueFrameLocked(
-                threadId,
-                cappedAssistantText,
-                message.OpenClawId,
-                message.OpenClawSeq);
+            assistantDisposition = cappedAssistantText.Length == 0
+                && assistantContent is not null
+                && string.IsNullOrEmpty(message.OpenClawId)
+                && message.OpenClawSeq is null
+                ? AssistantQueueFrameDisposition.Render
+                : ClassifyAssistantQueueFrameLocked(
+                    threadId,
+                    cappedAssistantText,
+                    message.OpenClawId,
+                    message.OpenClawSeq);
         }
         if (assistantDisposition != AssistantQueueFrameDisposition.Render)
         {
@@ -2907,7 +2931,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 threadId,
                 message.Ts,
                 message.OpenClawId,
-                message.OpenClawSeq);
+                message.OpenClawSeq,
+                assistantContent: assistantContent);
             _activeRunIds.TryGetValue(threadId, out telemetryRunId);
             // If the gateway included a usage block on this chat event,
             // attach it so the assistant footer pills (↑/↓/R/ctx%) can
@@ -5455,6 +5480,11 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             var threadMeta = GetOrCreateThreadMetaLocked(threadId);
             var hasUsage = meta.InputTokens is not null || meta.OutputTokens is not null
                 || meta.ResponseTokens is not null || meta.ContextPercent is not null;
+            var hasAssistantContent = meta.AssistantContent is not null;
+            var updatedAssistantId = evt is ChatMessageEvent or ChatMessageDeltaEvent
+                ? next.Entries.LastOrDefault(
+                    static entry => entry.Kind == ChatTimelineItemKind.Assistant)?.Id
+                : null;
             for (int i = 0; i < next.Entries.Count; i++)
             {
                 var id = next.Entries[i].Id;
@@ -5463,8 +5493,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 {
                     threadMeta[id] = meta;
                 }
-                else if (hasUsage && threadMeta.TryGetValue(id, out var existing)
-                    && (existing.InputTokens is null && existing.OutputTokens is null))
+                else if (string.Equals(id, updatedAssistantId, StringComparison.Ordinal)
+                    && (hasUsage || hasAssistantContent)
+                    && threadMeta.TryGetValue(id, out var existing))
                 {
                     // Merge usage onto the existing assistant entry whose
                     // text was just upserted by this final delta.
@@ -5473,7 +5504,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         InputTokens = meta.InputTokens ?? existing.InputTokens,
                         OutputTokens = meta.OutputTokens ?? existing.OutputTokens,
                         ResponseTokens = meta.ResponseTokens ?? existing.ResponseTokens,
-                        ContextPercent = meta.ContextPercent ?? existing.ContextPercent
+                        ContextPercent = meta.ContextPercent ?? existing.ContextPercent,
+                        AssistantContent = meta.AssistantContent ?? existing.AssistantContent
                     };
                 }
             }
@@ -5864,7 +5896,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         return AssistantQueueFrameDisposition.Render;
     }
 
-    private bool IsIdentitylessAssistantRetransmitAcrossLocalUserBoundaryLocked(string threadId, string assistantText)
+    private bool IsIdentitylessAssistantRetransmitAcrossLocalUserBoundaryLocked(
+        string threadId,
+        string assistantText)
     {
         if (!_locallyInitiatedThreads.Contains(threadId) ||
             _activeRunIds.ContainsKey(threadId) ||
@@ -6362,7 +6396,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         string? openClawKind = null,
         long? compactionTokensBefore = null,
         long? compactionTokensAfter = null,
-        IReadOnlyList<ChatAttachmentPresentation>? attachments = null)
+        IReadOnlyList<ChatAttachmentPresentation>? attachments = null,
+        ChatAssistantContentPresentation? assistantContent = null)
     {
         var ts = tsMs is { } v && v > 0
             ? DateTimeOffset.FromUnixTimeMilliseconds(v).ToLocalTime()
@@ -6378,7 +6413,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             CompactionTokensAfter: compactionTokensAfter,
             IsLocalQueuedSend: isLocalQueuedSend,
             LocalQueuedMessageId: localQueuedMessageId,
-            Attachments: attachments);
+            Attachments: attachments,
+            AssistantContent: assistantContent);
     }
 
     private static List<ChatMessageInfo> OrderHistoryMessages(List<(ChatMessageInfo Message, int Index)> messages)

@@ -8824,6 +8824,164 @@ public class OpenClawChatDataProviderTests
         Assert.Equal("hello there", entry.Text);
     }
 
+    [Fact]
+    public async Task OnChatMessageReceived_MediaOnlyAssistant_CreatesSafePresentationEntry()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        await provider.LoadAsync();
+        snapshots.Clear();
+
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = string.Empty,
+            State = "final",
+            ContentParts =
+            [
+                new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Media,
+                    Media = new ChatMediaContentInfo
+                    {
+                        Kind = ChatMediaContentKind.Image,
+                        Source = ChatMediaContentSource.LegacyDirective,
+                        FileName = "banner.png",
+                    },
+                },
+            ],
+        });
+
+        var timeline = snapshots[^1].Timelines["main"];
+        var entry = Assert.Single(timeline.Entries);
+        Assert.Equal(ChatTimelineItemKind.Assistant, entry.Kind);
+        Assert.Equal(string.Empty, entry.Text);
+        var metadata = provider.GetEntryMetadata("main");
+        var media = Assert.Single(metadata[entry.Id].AssistantContent!.Media);
+        Assert.Equal("banner.png", media.DisplayName);
+    }
+
+    [Fact]
+    public async Task OnChatMessageReceived_FinalMedia_MergesIntoStreamingAssistantEntry()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        await provider.LoadAsync();
+        snapshots.Clear();
+
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = "Rendering",
+            State = "delta",
+        });
+        bridge.RaiseChat(new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = "Rendering complete",
+            State = "final",
+            ContentParts =
+            [
+                new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Media,
+                    Media = new ChatMediaContentInfo
+                    {
+                        Kind = ChatMediaContentKind.Image,
+                        Source = ChatMediaContentSource.Structured,
+                        ArtifactId = "artifact-1",
+                        FileName = "banner.png",
+                    },
+                },
+            ],
+        });
+
+        var timeline = snapshots[^1].Timelines["main"];
+        var entry = Assert.Single(timeline.Entries, item => item.Kind == ChatTimelineItemKind.Assistant);
+        Assert.Equal("Rendering complete", entry.Text);
+        Assert.False(entry.IsStreaming);
+        var media = Assert.Single(provider.GetEntryMetadata("main")[entry.Id].AssistantContent!.Media);
+        Assert.Equal("artifact-1", media.Reference.ArtifactId);
+    }
+
+    [Fact]
+    public async Task OnChatMessageReceived_IdentifiedMediaOnlyRetransmit_DoesNotDuplicateEntry()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        await provider.LoadAsync();
+        snapshots.Clear();
+        var message = new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "assistant",
+            Text = string.Empty,
+            State = "final",
+            OpenClawId = "assistant-media-1",
+            ContentParts =
+            [
+                new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Media,
+                    Media = new ChatMediaContentInfo
+                    {
+                        Kind = ChatMediaContentKind.Image,
+                        Source = ChatMediaContentSource.LegacyDirective,
+                        FileName = "banner.png",
+                    },
+                },
+            ],
+        };
+
+        bridge.RaiseChat(message);
+        bridge.RaiseChat(message);
+
+        var timeline = snapshots[^1].Timelines["main"];
+        Assert.Single(timeline.Entries, item => item.Kind == ChatTimelineItemKind.Assistant);
+    }
+
+    [Fact]
+    public async Task LoadHistoryAsync_StructuredMedia_CreatesSafePresentationEntry()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    SessionKey = "main",
+                    Role = "assistant",
+                    ContentParts =
+                    [
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Media,
+                            Media = new ChatMediaContentInfo
+                            {
+                                Kind = ChatMediaContentKind.Image,
+                                Source = ChatMediaContentSource.Structured,
+                                ArtifactId = "artifact-1",
+                                FileName = "banner.png",
+                            },
+                        },
+                    ],
+                },
+            ],
+        });
+        await provider.LoadAsync();
+        snapshots.Clear();
+
+        await provider.LoadHistoryAsync("main");
+
+        var timeline = snapshots[^1].Timelines["main"];
+        var entry = Assert.Single(timeline.Entries, item => item.Kind == ChatTimelineItemKind.Assistant);
+        var media = Assert.Single(provider.GetEntryMetadata("main")[entry.Id].AssistantContent!.Media);
+        Assert.Equal("banner.png", media.DisplayName);
+        Assert.Equal("artifact-1", media.Reference.ArtifactId);
+    }
+
     // ── chat rubber-duck MEDIUM 4: per-message size cap ──
 
     [Fact]
