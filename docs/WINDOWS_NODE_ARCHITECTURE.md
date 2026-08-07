@@ -621,6 +621,16 @@ text is untouched. The tail's arity is preserved as well, so a pre-joined tail s
 one element and a tokenized tail keeps its elements and no new process-creation
 quoting is introduced.
 
+Both pins apply to **every** approved run of a recognized canonical carrier,
+including a one-time Allow Once, not only to durable approvals. Approval identity
+and durability are separate from execution transport: the prompt names the inner
+executable the binder resolved through a trusted system `cmd.exe`, so executing the
+request's own argv instead would reopen both launch-time lookups after the operator
+had already decided, and a `cmd.exe` planted earlier on PATH than the system
+directory would run in place of the image that was shown. Pinning a one-time allow
+persists nothing; durability is still gated separately on an Allow Always decision
+with a bound reusable command.
+
 Pinning is refused rather than approximated. The pinned path must be writable into
 the payload as a single token that `cmd` reads back byte for byte: no whitespace, no
 quote, none of `% ! ^ & | < > ( )`, none of `, ; =` (which end `cmd`'s command-name

@@ -1223,9 +1223,35 @@ public class ExecApprovalsCoordinatorTests : IDisposable
         Assert.Equal("^\0\0$", entry.ArgPattern);
     }
 
+    // The carrier form survives a one-time allow, but both launch-time lookups are pinned:
+    // argv[0] is the resolved system cmd.exe and the payload token is fully qualified. The
+    // operator was shown the inner executable the binder resolved, so the request's own argv
+    // must not be re-resolved against PATH or cwd after the decision.
     [Fact]
-    public async Task AllowOnce_CanonicalHostname_PreservesOriginalCmdCarrier()
+    public async Task AllowOnce_CanonicalHostname_ExecutesThePinnedCarrier()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
+        // Same binder the coordinator uses. Coordinator requests cannot carry a custom env,
+        // so the bare payload resolves against the process PATH: pick the first candidate
+        // this host can actually pin. On a machine where coreutils shadows a system name the
+        // resolved path contains a space and the binder correctly refuses it, which is a
+        // different claim than the one under test.
+        ExecReusableCommand? bound = null;
+        var payload = "";
+        foreach (var candidate in new[] { "where.exe", "whoami.exe", "hostname.exe" })
+        {
+            bound = ExecReusableCommandBinder.TryBind(
+                ["cmd.exe", "/d", "/s", "/c", candidate], cwd: null, env: null);
+            if (bound is not null && bound.IsCarrierTransport)
+            {
+                payload = candidate;
+                break;
+            }
+            bound = null;
+        }
+        Assert.NotNull(bound);
+
         WriteStoreFile(
             """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
 
@@ -1233,12 +1259,25 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             canPresent: AlwaysCanPresentEvaluator.Instance,
             prompt: new FixedDecisionPromptHandler(ExecApprovalPromptOutcome.AllowOnce))
             .HandleAsync(
-                Req("""{"command":["cmd.exe","/d","/s","/c","hostname.exe"]}"""),
-                "bound-hostname-once");
+                Req($$"""{"command":["cmd.exe","/d","/s","/c","{{payload}}"]}"""),
+                "bound-payload-once");
 
         Assert.True(result.IsAllow);
-        Assert.EndsWith("cmd.exe", result.Execution!.Argv[0], StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(["/d", "/s", "/c", "hostname.exe"], result.Execution.Argv.Skip(1).ToArray());
+
+        // argv[0] is the resolved system image, never a bare "cmd.exe" that Windows would
+        // look up again at launch against a PATH the request does not control.
+        Assert.Equal(SystemCmdPath, result.Execution!.Argv[0], StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(["/d", "/s", "/c"], result.Execution.Argv.Skip(1).Take(3).ToArray());
+
+        // The payload token is pinned too, which is the observable difference from
+        // executing the request's own argv verbatim.
+        Assert.NotEqual(payload, result.Execution.Argv[4]);
+        Assert.True(Path.IsPathFullyQualified(result.Execution.Argv[4]));
+        Assert.EndsWith(
+            @"\" + payload, result.Execution.Argv[4], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(bound!.ExecutionArgv.ToArray(), result.Execution.Argv.ToArray());
+
+        // A one-time allow still persists nothing: pinning is a transport choice only.
         Assert.Empty(new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
     }
 

@@ -261,8 +261,8 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
 
         // Step 8: build payload before any store writes — a fail-closed payload result
         // must not leave persistent allowlist state behind.
-        var useReusableExecution = persistAllowlistEntry || fallbackAllowWasMatchDependent;
-        if (useReusableExecution && identity.ReusableCommand is null)
+        var requiresReusableExecution = persistAllowlistEntry || fallbackAllowWasMatchDependent;
+        if (requiresReusableExecution && identity.ReusableCommand is null)
         {
             return LogAndReturn(
                 ExecApprovalV2Result.InternalError(
@@ -270,6 +270,19 @@ public sealed class ExecApprovalsCoordinator : IExecApprovalV2Handler
                 correlationId, promptAttempted, fallbackUsed,
                 canonical: context.DisplayCommand);
         }
+
+        // A recognized canonical carrier executes through its pinned transport even for a
+        // one-time allow. The prompt names the inner executable the binder resolved through
+        // a trusted system cmd.exe, so running the request's own argv instead would let both
+        // launch-time lookups happen again after the operator decided: a cmd.exe earlier on
+        // PATH than the system directory would become argv[0], and a bare payload name would
+        // re-resolve against PATH or cwd. Neither is the image that was shown and approved.
+        // This is a transport choice only. Durability is still governed by
+        // requiresReusableExecution, so a one-time allow persists nothing.
+        var useReusableExecution =
+            requiresReusableExecution
+            || identity.ReusableCommand?.IsCarrierTransport == true;
+
         var execution = useReusableExecution
             ? BuildReusableApprovedExecution(
                 identity.ReusableCommand,
