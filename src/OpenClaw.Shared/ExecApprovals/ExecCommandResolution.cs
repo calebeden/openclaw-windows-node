@@ -415,55 +415,18 @@ internal static class ExecCommandResolver
         return null;
     }
 
-    /// <summary>
-    /// True when a bare command name would resolve to a file in <paramref name="cwd"/>.
-    ///
-    /// Our PATH search deliberately excludes the current directory, but cmd.exe searches
-    /// it <em>first</em>.
-    ///
-    /// This is diagnostic only. It used to be the guard that refused to bind a carrier
-    /// whose payload was a bare name, but a check taken at approval time cannot decide
-    /// what cmd.exe will find at launch time; anything able to write to the working
-    /// directory in between simply wins after the check has passed. The carrier's
-    /// payload executable is now pinned to its resolved absolute path instead, which
-    /// leaves cmd nothing to search for. Do not restore this as an authorization
-    /// boundary.
-    /// </summary>
-    internal static bool HasCurrentDirectoryCandidate(
-        string name,
-        string? cwd,
-        IReadOnlyDictionary<string, string>? env)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return false;
-        // Only bare names are ambiguous. Anything carrying a separator is resolved
-        // relative to the current directory by both cmd.exe and our resolver.
-        if (name.IndexOfAny(['\\', '/']) >= 0)
-            return false;
-
-        // An omitted cwd does not mean "no current directory": the child inherits this
-        // process's, and cmd.exe searches it just the same. Fall back to it rather than
-        // treating the omission as safe.
-        var effectiveCwd = string.IsNullOrWhiteSpace(cwd)
-            ? TryGetProcessCurrentDirectory()
-            : cwd;
-        if (string.IsNullOrWhiteSpace(effectiveCwd))
-            return false;
-
-        return FindInPath(name, [effectiveCwd], GetPathExtensions(env)) is not null;
-    }
-
-    private static string? TryGetProcessCurrentDirectory()
-    {
-        try
-        {
-            return Environment.CurrentDirectory;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    // NOTE: this type used to expose HasCurrentDirectoryCandidate, which reported
+    // whether a bare command name would resolve inside the working directory. Our PATH
+    // search deliberately excludes the current directory, but cmd.exe searches it
+    // first, so that helper was the guard that refused to durably bind a carrier whose
+    // payload was a bare name.
+    //
+    // It has been deleted rather than kept as a diagnostic. A check taken at approval
+    // time cannot decide what cmd.exe will find at launch time: anything able to write
+    // to the working directory in between simply wins after the check has passed. A
+    // trusted carrier's payload executable is now pinned to its resolved absolute path
+    // (CanonicalCmdCarrier.TryBuildPinnedCarrier), which leaves cmd nothing to search
+    // for. Do not restore a working-directory check as an authorization boundary.
 
     private static string? FindInPath(
         string name,

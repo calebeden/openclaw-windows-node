@@ -652,7 +652,7 @@ diagnostic (`carrier-payload-not-static`) rather than silently failing to bind.
 Pinning supersedes the earlier approval-time working-directory ambiguity check. That
 check could only observe the directory as it was when approval was granted, so a
 writable working directory could gain a shadowing file before launch and win anyway.
-It is retained only as a diagnostic helper and must not be restored as an
+It has been deleted rather than kept as a diagnostic, and must not be restored as an
 authorization boundary.
 
 ##### Behavior changes from the previous executable-path-only binding
